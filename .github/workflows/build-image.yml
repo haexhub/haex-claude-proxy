@@ -1,0 +1,77 @@
+# Build the haex-claude-proxy image and push it to GitHub Container Registry.
+#
+# Image is consumed by the production Ansible deployment
+# (roles/haex-claude-proxy/ in the ansible repo) which `docker compose pull`s
+# the tag specified in its docker-compose.yml.j2 template (default: `:latest`
+# on default branch, or a pinned `:sha-<short>` for reproducible deploys).
+#
+# Mirrors haex-corp/.github/workflows/build-haex-corp-image.yml structure
+# (multi-arch amd64+arm64, GHA cache, metadata-action tag scheme).
+#
+# Security note: this workflow uses only github-native context vars
+# (repository_owner, actor, GITHUB_TOKEN) and outputs from the trusted
+# docker/metadata-action. No user-controlled inputs (PR titles, commit
+# messages, branch names typed into shell) are interpolated into run:
+# steps, so workflow-injection per
+# https://github.blog/security/vulnerability-research/how-to-catch-github-actions-workflow-injections-before-attackers-do/
+# does not apply.
+
+name: Build haex-claude-proxy image
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+    paths:
+      - "Dockerfile"
+      - "src/**"
+      - "package.json"
+      - ".github/workflows/build-image.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up QEMU (multi-arch emulation for arm64 builds)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/haex-claude-proxy
+          tags: |
+            type=ref,event=branch
+            type=ref,event=tag
+            type=sha,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
