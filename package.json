@@ -1,0 +1,14 @@
+{
+  "name": "haex-claude-proxy",
+  "version": "0.1.0",
+  "description": "Anthropic-API-compatible HTTP proxy that wraps `claude` CLI subprocess to use Claude Pro/Max OAuth tokens instead of API keys. Lets hermes-agents (and any other Anthropic-API client) consume a Claude.ai subscription via local OAuth.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/"
+  }
+}
