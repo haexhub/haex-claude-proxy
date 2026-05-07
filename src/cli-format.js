@@ -54,12 +54,11 @@ export function anthropicMessagesToPrompt(body) {
   const lines = [];
   const systemText = body.system != null ? flattenContent(body.system) : null;
 
-  if (Array.isArray(body.tools) && body.tools.length > 0) {
-    const toolsSpec = body.tools
-      .map((t) => `- ${t.name}: ${t.description ?? "(no description)"}\n  input_schema: ${JSON.stringify(t.input_schema ?? {})}`)
-      .join("\n");
-    lines.push(`<available_tools>\n${toolsSpec}\n</available_tools>\n`);
-  }
+  // Tools are intentionally not expanded into the prompt — the claude CLI runs
+  // with --allowed-tools "" so it cannot execute any tool_use blocks, and
+  // including full tool schemas inflates input tokens enormously (can add 30K+
+  // tokens for a typical hermes tool list). The caller handles tool execution
+  // on its side; this proxy only needs to return the model's text reasoning.
 
   for (const m of body.messages) {
     const text = flattenContent(m.content);
@@ -106,15 +105,14 @@ export function buildClaudeArgs({ model, systemPrompt, streaming }) {
     "--output-format", streaming ? "stream-json" : "json",
   ];
   if (streaming) {
-    // Without --include-partial-messages, stream-json emits only end-of-turn
-    // aggregated `assistant` events — we'd lose progressive streaming.
     args.push("--include-partial-messages");
-    // --verbose is required by the CLI when stream-json is combined with
-    // --print; without it the CLI rejects the combination.
     args.push("--verbose");
   }
-  if (systemPrompt) {
-    args.push("--append-system-prompt", systemPrompt);
+  // Skip appending blank/whitespace-only system prompts — they add 6K+ cache
+  // creation tokens per call (extra usage charges) with no benefit.
+  const effectiveSystem = systemPrompt?.trim() ?? "";
+  if (effectiveSystem) {
+    args.push("--append-system-prompt", effectiveSystem);
   }
   return args;
 }
@@ -144,6 +142,50 @@ export function claudeJsonToAnthropic(claudeOut, model) {
       output_tokens: u.output_tokens ?? 0,
       cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0,
       cache_read_input_tokens: u.cache_read_input_tokens ?? 0,
+    },
+  };
+}
+
+/**
+ * Normalize an OpenAI Chat Completions request body to Anthropic Messages API
+ * format. Extracts a leading system message into the `system` field and strips
+ * OpenAI-only fields that our downstream logic doesn't understand.
+ *
+ * @param {object} body raw OpenAI-format request body
+ * @returns {object} Anthropic-format body ready for validateMessagesBody
+ */
+export function openAIBodyToAnthropic(body) {
+  const messages = Array.isArray(body.messages) ? [...body.messages] : [];
+  let system;
+  if (messages.length > 0 && messages[0].role === "system") {
+    system = typeof messages[0].content === "string"
+      ? messages[0].content
+      : JSON.stringify(messages[0].content);
+    messages.shift();
+  }
+  return { model: body.model, messages, system, stream: body.stream };
+}
+
+/**
+ * Convert an Anthropic Messages-API response to OpenAI Chat Completions format.
+ *
+ * @param {object} anthropicResp
+ * @returns {object}
+ */
+export function anthropicToOpenAIResponse(anthropicResp) {
+  const text = anthropicResp.content?.[0]?.text ?? "";
+  const u = anthropicResp.usage ?? {};
+  const finishReason = anthropicResp.stop_reason === "end_turn" ? "stop" : (anthropicResp.stop_reason ?? "stop");
+  return {
+    id: (anthropicResp.id ?? "msg_").replace(/^msg_/, "chatcmpl-"),
+    object: "chat.completion",
+    created: Math.floor(Date.now() / 1000),
+    model: anthropicResp.model,
+    choices: [{ index: 0, message: { role: "assistant", content: text }, finish_reason: finishReason }],
+    usage: {
+      prompt_tokens: u.input_tokens ?? 0,
+      completion_tokens: u.output_tokens ?? 0,
+      total_tokens: (u.input_tokens ?? 0) + (u.output_tokens ?? 0),
     },
   };
 }

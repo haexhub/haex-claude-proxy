@@ -123,14 +123,17 @@ test("anthropicMessagesToPrompt: preserves multi-turn order", () => {
   assert.ok(idxQ1 >= 0 && idxA1 > idxQ1 && idxQ2 > idxA1, "turns preserved in order");
 });
 
-test("anthropicMessagesToPrompt: includes tools spec when provided", () => {
+test("anthropicMessagesToPrompt: tools are NOT inlined into the prompt", () => {
+  // The CLI runs with --allowed-tools "" so the model can't execute tools;
+  // including their full schemas just inflates input tokens (~30K extra
+  // for hermes' tool list). Caller handles tool execution upstream.
   const { promptText } = anthropicMessagesToPrompt({
     model: "x",
     messages: [{ role: "user", content: "x" }],
     tools: [{ name: "foo", description: "Does foo", input_schema: { type: "object" } }],
   });
-  assert.match(promptText, /<available_tools>/);
-  assert.match(promptText, /foo: Does foo/);
+  assert.doesNotMatch(promptText, /<available_tools>/);
+  assert.doesNotMatch(promptText, /foo: Does foo/);
 });
 
 test("anthropicMessagesToPrompt: emits null systemText when no system", () => {
