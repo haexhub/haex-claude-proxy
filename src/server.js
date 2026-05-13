@@ -399,9 +399,61 @@ const ANTHROPIC_API_VERSION =
   process.env.ANTHROPIC_API_VERSION ?? "2023-06-01";
 const ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com";
 
+// Hosts the proxy is allowed to forward an api_key credential to.
+// `cred.baseUrl` (set by the tenant in the credential row) flows into
+// this resolver — without an allowlist a malicious tenant could point
+// it at `http://attacker.example` and exfiltrate their own decrypted
+// upstream key via the `x-api-key` header. Override / extend via
+// PROXY_ALLOWED_FORWARD_HOSTS as a comma-separated host list.
+const DEFAULT_ALLOWED_FORWARD_HOSTS = new Set(["api.anthropic.com"]);
+const ALLOWED_FORWARD_HOSTS = (() => {
+  const raw = (process.env.PROXY_ALLOWED_FORWARD_HOSTS ?? "").trim();
+  if (!raw) return DEFAULT_ALLOWED_FORWARD_HOSTS;
+  const set = new Set(DEFAULT_ALLOWED_FORWARD_HOSTS);
+  for (const h of raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)) {
+    set.add(h);
+  }
+  return set;
+})();
+
+// Hard upstream timeout — protects against slow / hung Anthropic
+// responses tying up a proxy worker indefinitely. Tunable via env in
+// case a deploy needs a longer budget.
+const UPSTREAM_TIMEOUT_MS = Number(process.env.PROXY_UPSTREAM_TIMEOUT_MS ?? 120_000);
+
+function resolveForwardTarget(rawBase) {
+  let parsed;
+  try {
+    parsed = new URL(rawBase || ANTHROPIC_DEFAULT_BASE);
+  } catch {
+    return { error: `invalid base URL: ${rawBase}` };
+  }
+  if (parsed.protocol !== "https:") {
+    return { error: `forward target must be https, got ${parsed.protocol}` };
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (!ALLOWED_FORWARD_HOSTS.has(host)) {
+    return {
+      error: `host '${host}' is not in PROXY_ALLOWED_FORWARD_HOSTS — refusing to forward`,
+    };
+  }
+  // Drop trailing slashes / paths beyond the origin so we always hit
+  // `/v1/messages` on the resolved host regardless of how the tenant
+  // wrote their baseUrl.
+  return { url: `${parsed.origin}/v1/messages` };
+}
+
 async function forwardAnthropicMessages(req, res, body, ctx) {
-  const base = (ctx.baseUrl || ANTHROPIC_DEFAULT_BASE).replace(/\/+$/, "");
-  const target = `${base}/v1/messages`;
+  const targetResolution = resolveForwardTarget(ctx.baseUrl);
+  if (targetResolution.error) {
+    return errorResponse(
+      res,
+      400,
+      "invalid_request_error",
+      targetResolution.error,
+    );
+  }
+  const target = targetResolution.url;
   const headers = {
     "content-type": "application/json",
     "x-api-key": ctx.apiKey,
@@ -419,19 +471,33 @@ async function forwardAnthropicMessages(req, res, body, ctx) {
     target,
   );
 
+  // Three abort triggers feed one AbortController:
+  //   1. hard timeout — caps how long we wait on the upstream.
+  //   2. client disconnect — agent went away, no point keeping the
+  //      upstream open and burning tokens.
+  //   3. error in our own loop — propagate to upstream so it can stop.
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(new Error("upstream timeout")), UPSTREAM_TIMEOUT_MS);
+  const onClientClose = () => controller.abort(new Error("client disconnect"));
+  req.on("close", onClientClose);
+
   let upstream;
   try {
     upstream = await fetch(target, {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: controller.signal,
     });
   } catch (e) {
+    clearTimeout(timeoutId);
+    req.off("close", onClientClose);
+    const isAbort = e.name === "AbortError";
     return errorResponse(
       res,
-      502,
+      isAbort ? 504 : 502,
       "api_error",
-      `upstream fetch failed: ${e.message}`,
+      isAbort ? `upstream aborted: ${controller.signal.reason?.message ?? "unknown"}` : `upstream fetch failed: ${e.message}`,
     );
   }
 
@@ -442,6 +508,8 @@ async function forwardAnthropicMessages(req, res, body, ctx) {
     upstream.headers.get("content-type") || "application/json";
   res.writeHead(upstream.status, { "content-type": contentType });
   if (!upstream.body) {
+    clearTimeout(timeoutId);
+    req.off("close", onClientClose);
     res.end();
     return;
   }
@@ -453,8 +521,15 @@ async function forwardAnthropicMessages(req, res, body, ctx) {
       if (value) res.write(Buffer.from(value));
     }
   } catch (e) {
-    console.error("[proxy] forward stream aborted:", e.message);
+    if (e.name === "AbortError") {
+      console.log("[proxy] forward stream aborted:", controller.signal.reason?.message);
+    } else {
+      console.error("[proxy] forward stream error:", e.message);
+    }
   } finally {
+    clearTimeout(timeoutId);
+    req.off("close", onClientClose);
+    try { reader.cancel(); } catch { /* already closed */ }
     res.end();
   }
 }
