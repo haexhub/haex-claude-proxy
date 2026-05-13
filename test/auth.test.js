@@ -109,9 +109,14 @@ function fakeStorePool(client) {
   return { async connect() { return client; } };
 }
 
-test("createCredentialsStore.load: BEGIN + set_config + SELECT + COMMIT, decrypted plaintext returned", async () => {
+test("createCredentialsStore.load: legacy fallback path picks latest oauth_claude row, returns plaintext", async () => {
   const client = fakeStoreClient([{
     id: VALID_UUID,
+    provider: "anthropic",
+    mode: "oauth_claude",
+    enabled: true,
+    oauth_status: "authorized",
+    base_url: null,
     oauth_credentials_iv: "iv-x",
     oauth_credentials_tag: "tag-x",
     oauth_credentials_data: "data-x",
@@ -122,6 +127,7 @@ test("createCredentialsStore.load: BEGIN + set_config + SELECT + COMMIT, decrypt
     return "PLAINTEXT-JSON";
   });
   const result = await store.load("user", VALID_UUID);
+  assert.equal(result.mode, "oauth_claude");
   assert.equal(result.id, VALID_UUID);
   assert.equal(result.plaintext, "PLAINTEXT-JSON");
   const sqls = client.calls.map((c) => c.sql);
@@ -134,6 +140,67 @@ test("createCredentialsStore.load: BEGIN + set_config + SELECT + COMMIT, decrypt
   assert.ok(
     sqls.some((s) => s.includes("set_config('app.current_owner_id'")),
     "owner_id must be set via set_config",
+  );
+});
+
+test("createCredentialsStore.load: credentialId path returns api_key shape with decrypted key", async () => {
+  const credId = "22222222-3333-4444-5555-666666666666";
+  const client = fakeStoreClient([{
+    id: credId,
+    provider: "anthropic",
+    mode: "api_key",
+    enabled: true,
+    oauth_status: null,
+    base_url: "https://api.example.com",
+    api_key_iv: "iv-k",
+    api_key_tag: "tag-k",
+    api_key_data: "data-k",
+    oauth_credentials_iv: null,
+    oauth_credentials_tag: null,
+    oauth_credentials_data: null,
+    oauth_expires_at: null,
+  }]);
+  const store = createCredentialsStore(fakeStorePool(client), (entry) => {
+    assert.deepEqual(entry, { iv: "iv-k", tag: "tag-k", data: "data-k" });
+    return "sk-ant-secret";
+  });
+  const result = await store.load("user", VALID_UUID, credId);
+  assert.equal(result.mode, "api_key");
+  assert.equal(result.id, credId);
+  assert.equal(result.provider, "anthropic");
+  assert.equal(result.apiKey, "sk-ant-secret");
+  assert.equal(result.baseUrl, "https://api.example.com");
+  // credentialId branch must use `WHERE id = $1`, not the legacy owner filter
+  const selectCall = client.calls.find((c) => c.sql.includes("SELECT id"));
+  assert.deepEqual(selectCall.params, [credId]);
+});
+
+test("createCredentialsStore.load: returns null when row exists but is disabled", async () => {
+  const client = fakeStoreClient([{
+    id: VALID_UUID,
+    provider: "anthropic",
+    mode: "api_key",
+    enabled: false,
+    oauth_status: null,
+    base_url: null,
+    api_key_iv: "iv-k",
+    api_key_tag: "tag-k",
+    api_key_data: "data-k",
+    oauth_credentials_iv: null,
+    oauth_credentials_tag: null,
+    oauth_credentials_data: null,
+    oauth_expires_at: null,
+  }]);
+  const store = createCredentialsStore(fakeStorePool(client), () => "");
+  assert.equal(await store.load("user", VALID_UUID, VALID_UUID), null);
+});
+
+test("createCredentialsStore.load: rejects malformed credentialId", async () => {
+  const client = fakeStoreClient([]);
+  const store = createCredentialsStore(fakeStorePool(client), () => "");
+  await assert.rejects(
+    () => store.load("user", VALID_UUID, "not-a-uuid"),
+    /invalid credentialId/,
   );
 });
 
@@ -198,13 +265,15 @@ test("createDbLookup: returns null for an empty result set", async () => {
   assert.equal(await lookup(VALID_TOKEN), null);
 });
 
-test("createDbLookup: returns owner shape for a valid row", async () => {
+test("createDbLookup: returns owner shape (with credentialId) for a valid row", async () => {
+  const credId = "77777777-8888-9999-aaaa-bbbbbbbbbbbb";
   const lookup = createDbLookup(
     fakePool([
       {
         user_id: VALID_UUID,
         owner_kind: "user",
         owner_id: VALID_UUID,
+        credential_id: credId,
         expires_at: new Date(Date.now() + 60_000),
         revoked_at: null,
       },
@@ -215,7 +284,25 @@ test("createDbLookup: returns owner shape for a valid row", async () => {
     userId: VALID_UUID,
     ownerKind: "user",
     ownerId: VALID_UUID,
+    credentialId: credId,
   });
+});
+
+test("createDbLookup: credentialId is null for legacy sessions minted before the schema bump", async () => {
+  const lookup = createDbLookup(
+    fakePool([
+      {
+        user_id: VALID_UUID,
+        owner_kind: "user",
+        owner_id: VALID_UUID,
+        credential_id: null,
+        expires_at: new Date(Date.now() + 60_000),
+        revoked_at: null,
+      },
+    ]),
+  );
+  const r = await lookup(VALID_TOKEN);
+  assert.equal(r.credentialId, null);
 });
 
 test("createDbLookup: returns null for a revoked session", async () => {
