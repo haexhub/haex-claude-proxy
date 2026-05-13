@@ -1,22 +1,28 @@
 /**
- * Multi-tenant session-token resolver.
+ * Multi-tenant session-token + credentials resolver.
  *
- * Phase 7: hermes workers spawned by specifyr forward an
+ * hermes workers spawned by specifyr forward an
  * `ANTHROPIC_API_KEY=<sessionToken>` (minted by specifyr's
- * runner_sessions table). The proxy reads that token from the inbound
- * request, looks it up against the same Postgres, and resolves it to
- * an `(ownerKind, ownerId)` pair. The `claude` CLI subprocess is then
- * spawned with `HOME=/credentials/<ownerKind>/<ownerId>` so it reads
- * the matching `.claude/.credentials.json`.
+ * runner_sessions table). This module:
  *
- * One container, many subprocesses, isolated only by HOME.
+ *   1. extracts the token from the inbound request,
+ *   2. resolves it via createDbLookup → (ownerKind, ownerId),
+ *   3. loads the encrypted oauth credential row for that owner via
+ *      createCredentialsStore. Both load() and writeback() set
+ *      `app.current_owner_kind/id` via `set_config(..., true)` inside
+ *      a transaction so Postgres Row-Level-Security policies on the
+ *      `llm_credentials` table only expose rows the resolved owner is
+ *      authorised for. Without those SETs the queries see nothing
+ *      under the `haex_claude_proxy` DB role.
  *
- * When DATABASE_URL is unset (Phase 6 pre-rollout, dev workstations),
- * the resolver returns null for every token and the caller falls back
- * to the historical single-tenant `/home/node/.claude` mount.
+ * The caller stages the decrypted plaintext into an ephemeral HOME
+ * (tmpfs, per-request) and points the `claude` subprocess at it. After
+ * the subprocess exits, writeback() persists the refreshed blob.
+ *
+ * No bind-mounted credentials dir, no plaintext on disk past process
+ * exit. When DATABASE_URL or SPECIFYR_SECRET_KEY is unset the proxy
+ * returns 503 for every request — there is no host-fallback mode.
  */
-
-import path from "node:path";
 
 const TOKEN_REGEX = /^[0-9a-f]{64}$/;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -82,22 +88,147 @@ export function createDbLookup(pool) {
 }
 
 /**
- * Maps an (ownerKind, ownerId) pair to the directory the spawned
- * claude CLI should treat as $HOME. The CLI reads
- * `$HOME/.claude/.credentials.json`; layout under credentialsRoot:
+ * Lädt die in DB verschlüsselt persistierten OAuth-Credentials für einen
+ * Owner und liefert (id, plaintext, expiresAt) zurück.
  *
- *   <root>/user/<userId>/.claude/.credentials.json
- *   <root>/org/<orgId>/.claude/.credentials.json
+ * RLS-aware: vor dem SELECT setzen wir `app.current_owner_kind/id` via
+ * set_config(..., true) in einer Transaction, weil die llm_credentials-
+ * Policy für die haex_claude_proxy-DB-Rolle auf diese Settings filtert.
+ * Ohne SET findet der Query NICHTS, selbst wenn die Row existiert.
  *
- * Validates inputs because they go straight into a path — anything
- * untrusted in there would be a path-traversal bug.
+ * Returns null, wenn kein authorisierter oauth_claude-Eintrag existiert.
  */
-export function homeForOwner(credentialsRoot, ownerKind, ownerId) {
-  if (ownerKind !== "user" && ownerKind !== "org") {
-    throw new Error(`invalid ownerKind: ${ownerKind}`);
+export function createCredentialsStore(pool, decrypt) {
+  return {
+    async load(ownerKind, ownerId) {
+      if (ownerKind !== "user" && ownerKind !== "org") {
+        throw new Error(`invalid ownerKind: ${ownerKind}`);
+      }
+      if (!UUID_REGEX.test(ownerId)) {
+        throw new Error(`invalid ownerId (not a uuid): ${ownerId}`);
+      }
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          "SELECT set_config('app.current_owner_kind', $1, true)",
+          [ownerKind],
+        );
+        await client.query(
+          "SELECT set_config('app.current_owner_id', $1, true)",
+          [ownerId],
+        );
+        const res = await client.query(
+          `SELECT id,
+                  oauth_credentials_iv,
+                  oauth_credentials_tag,
+                  oauth_credentials_data,
+                  oauth_expires_at
+           FROM llm_credentials
+           WHERE owner_kind = $1
+             AND owner_id   = $2
+             AND provider   = 'anthropic'
+             AND mode       = 'oauth_claude'
+             AND enabled    = true
+             AND oauth_status = 'authorized'
+             AND oauth_credentials_data IS NOT NULL
+           ORDER BY updated_at DESC
+           LIMIT 1`,
+          [ownerKind, ownerId],
+        );
+        await client.query("COMMIT");
+        const row = res.rows[0];
+        if (!row) return null;
+        const plaintext = decrypt({
+          iv: row.oauth_credentials_iv,
+          tag: row.oauth_credentials_tag,
+          data: row.oauth_credentials_data,
+        });
+        return {
+          id: row.id,
+          plaintext,
+          expiresAt: row.oauth_expires_at,
+        };
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+
+    /**
+     * Schreibt den (claude-refreshten) Plaintext-Token zurück. Identische
+     * RLS-Mechanik wie load(): SET LOCAL setzt den Owner-Kontext, die
+     * Policy lässt nur UPDATEs auf eigenen Rows zu. Spalten-GRANT in
+     * Ansible erlaubt UPDATE nur auf die fünf hier modifizierten Spalten.
+     */
+    async writeback(credId, ownerKind, ownerId, encrypted, expiresAt) {
+      if (ownerKind !== "user" && ownerKind !== "org") {
+        throw new Error(`invalid ownerKind: ${ownerKind}`);
+      }
+      if (!UUID_REGEX.test(ownerId) || !UUID_REGEX.test(credId)) {
+        throw new Error("invalid owner/credential UUID");
+      }
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          "SELECT set_config('app.current_owner_kind', $1, true)",
+          [ownerKind],
+        );
+        await client.query(
+          "SELECT set_config('app.current_owner_id', $1, true)",
+          [ownerId],
+        );
+        await client.query(
+          `UPDATE llm_credentials
+           SET oauth_credentials_iv   = $2,
+               oauth_credentials_tag  = $3,
+               oauth_credentials_data = $4,
+               oauth_expires_at       = $5,
+               updated_at             = NOW()
+           WHERE id = $1`,
+          [credId, encrypted.iv, encrypted.tag, encrypted.data, expiresAt],
+        );
+        await client.query("COMMIT");
+      } catch (err) {
+        await client.query("ROLLBACK").catch(() => {});
+        throw err;
+      } finally {
+        client.release();
+      }
+    },
+  };
+}
+
+/**
+ * Parst expiresAt aus dem credentials.json-Plaintext (gleiche Logik wie
+ * specifyr's readCredentialsState). Toleriert beide Shapes:
+ *   - top-level `expiresAt` (numeric ms)
+ *   - nested under `claudeAiOauth.expires_at` (ISO string)
+ * Returns null wenn nichts Verwertbares gefunden wurde.
+ */
+export function parseExpiresAt(plaintext) {
+  let parsed;
+  try {
+    parsed = JSON.parse(plaintext);
+  } catch {
+    return null;
   }
-  if (!UUID_REGEX.test(ownerId)) {
-    throw new Error(`invalid ownerId (not a uuid): ${ownerId}`);
+  const candidates = [];
+  for (const v of Object.values(parsed)) {
+    if (v && typeof v === "object") candidates.push(v);
   }
-  return path.join(credentialsRoot, ownerKind, ownerId);
+  candidates.push(parsed);
+  for (const c of candidates) {
+    const ms = typeof c.expiresAt === "number" ? c.expiresAt : undefined;
+    if (ms) return new Date(ms);
+    const iso = typeof c.expires_at === "string" ? c.expires_at : undefined;
+    if (iso) {
+      const d = new Date(iso);
+      if (!Number.isNaN(d.getTime())) return d;
+    }
+  }
+  return null;
 }
