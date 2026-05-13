@@ -140,17 +140,18 @@ const SUBPROCESS_ENV_BASE = (() => {
 })();
 
 /**
- * Bereitet eine per-Request HOME vor:
- *   1. Session-Token resolven → (ownerKind, ownerId).
- *   2. Verschlüsselte oauth_claude credentials aus DB lesen, decrypted.
- *   3. Ephemeren tmpfs-Pfad anlegen, `.claude/.credentials.json` schreiben.
- *   4. Return-Wert trägt den Pfad UND alles was wir für Writeback nach
- *      Spawn-Exit brauchen (credId, owner, spawnDir).
+ * Resolved per request:
+ *   - oauth_claude → stages a tmpfs HOME with `.claude/.credentials.json`
+ *     so the spawned claude CLI can pick the token up. Refreshed token
+ *     gets persisted back after spawn exits.
+ *   - api_key     → returns the decrypted upstream key + provider so the
+ *     handler can forward the inbound request to the real upstream API
+ *     instead of spawning `claude`. No HOME stage, nothing on disk.
  *
  * Auf Fehler: `{ error: { status, type, message } }` — Handler reicht
  * das als HTTP-Error weiter.
  */
-async function resolveRequestHome(req) {
+async function resolveRequestContext(req) {
   if (!pool || !credentialsStore) {
     return {
       error: {
@@ -185,7 +186,11 @@ async function resolveRequestHome(req) {
   }
   let cred;
   try {
-    cred = await credentialsStore.load(session.ownerKind, session.ownerId);
+    cred = await credentialsStore.load(
+      session.ownerKind,
+      session.ownerId,
+      session.credentialId,
+    );
   } catch (e) {
     return {
       error: {
@@ -201,8 +206,19 @@ async function resolveRequestHome(req) {
         status: 401,
         type: "authentication_error",
         message:
-          "no authorised Anthropic OAuth credential for this owner — re-run the in-app OAuth flow",
+          "no usable credential for this session — re-run OAuth or re-bind the api_key in Specifyr",
       },
+    };
+  }
+  if (cred.mode === "api_key") {
+    return {
+      mode: "api_key",
+      credId: cred.id,
+      provider: cred.provider,
+      apiKey: cred.apiKey,
+      baseUrl: cred.baseUrl,
+      ownerKind: session.ownerKind,
+      ownerId: session.ownerId,
     };
   }
   // Ephemerer Spawn-Pfad: /run/credentials/<random>/.claude/.credentials.json
@@ -225,6 +241,7 @@ async function resolveRequestHome(req) {
     };
   }
   return {
+    mode: "oauth_claude",
     home,
     credId: cred.id,
     ownerKind: session.ownerKind,
@@ -369,6 +386,80 @@ function handleGetModel(req, res, id) {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Anthropic api_key forwarding
+//
+// When the resolved credential is `mode='api_key'` we don't spawn the claude
+// CLI — the request is forwarded directly to api.anthropic.com (or a
+// per-credential override base URL) with the decrypted key in `x-api-key`.
+// This is the V2 closure for api_key mode: the agent container never sees
+// the upstream key, only the runner_session token.
+// ────────────────────────────────────────────────────────────────────────────
+
+const ANTHROPIC_API_VERSION =
+  process.env.ANTHROPIC_API_VERSION ?? "2023-06-01";
+const ANTHROPIC_DEFAULT_BASE = "https://api.anthropic.com";
+
+async function forwardAnthropicMessages(req, res, body, ctx) {
+  const base = (ctx.baseUrl || ANTHROPIC_DEFAULT_BASE).replace(/\/+$/, "");
+  const target = `${base}/v1/messages`;
+  const headers = {
+    "content-type": "application/json",
+    "x-api-key": ctx.apiKey,
+    "anthropic-version":
+      req.headers["anthropic-version"] || ANTHROPIC_API_VERSION,
+    accept: body.stream === true ? "text/event-stream" : "application/json",
+  };
+  const beta = req.headers["anthropic-beta"];
+  if (typeof beta === "string" && beta) headers["anthropic-beta"] = beta;
+
+  console.log(
+    "[proxy] forward api_key model=%s stream=%s target=%s",
+    body.model,
+    body.stream === true,
+    target,
+  );
+
+  let upstream;
+  try {
+    upstream = await fetch(target, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    return errorResponse(
+      res,
+      502,
+      "api_error",
+      `upstream fetch failed: ${e.message}`,
+    );
+  }
+
+  // Stream pass-through for SSE; buffered pass-through for JSON. We
+  // forward the upstream content-type verbatim so the SDK's stream
+  // parser still works.
+  const contentType =
+    upstream.headers.get("content-type") || "application/json";
+  res.writeHead(upstream.status, { "content-type": contentType });
+  if (!upstream.body) {
+    res.end();
+    return;
+  }
+  const reader = upstream.body.getReader();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) res.write(Buffer.from(value));
+    }
+  } catch (e) {
+    console.error("[proxy] forward stream aborted:", e.message);
+  } finally {
+    res.end();
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // POST /v1/messages
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -388,9 +479,21 @@ async function handleMessages(req, res) {
     return errorResponse(res, 400, "invalid_request_error", validation.error);
   }
 
-  const ctx = await resolveRequestHome(req);
+  const ctx = await resolveRequestContext(req);
   if (ctx.error) {
     return errorResponse(res, ctx.error.status, ctx.error.type, ctx.error.message);
+  }
+
+  if (ctx.mode === "api_key") {
+    if (ctx.provider !== "anthropic") {
+      return errorResponse(
+        res,
+        400,
+        "invalid_request_error",
+        `proxy forwarding is only implemented for Anthropic api_key credentials (got '${ctx.provider}')`,
+      );
+    }
+    return forwardAnthropicMessages(req, res, body, ctx);
   }
 
   const { promptText } = anthropicMessagesToPrompt(body);
@@ -443,9 +546,18 @@ async function handleChatCompletions(req, res) {
     return errorResponse(res, 400, "invalid_request_error", validation.error);
   }
 
-  const ctx = await resolveRequestHome(req);
+  const ctx = await resolveRequestContext(req);
   if (ctx.error) {
     return errorResponse(res, ctx.error.status, ctx.error.type, ctx.error.message);
+  }
+
+  if (ctx.mode === "api_key") {
+    return errorResponse(
+      res,
+      400,
+      "invalid_request_error",
+      "OpenAI-shape forwarding for api_key credentials is not implemented yet — use /v1/messages with an Anthropic credential",
+    );
   }
 
   const { promptText, systemText } = anthropicMessagesToPrompt(body);

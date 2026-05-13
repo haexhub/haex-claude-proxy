@@ -69,7 +69,7 @@ export function createDbLookup(pool) {
   return async function lookupSession(token) {
     if (!looksLikeSessionToken(token)) return null;
     const result = await pool.query(
-      `SELECT user_id, owner_kind, owner_id, expires_at, revoked_at
+      `SELECT user_id, owner_kind, owner_id, credential_id, expires_at, revoked_at
        FROM runner_sessions
        WHERE token = $1
        LIMIT 1`,
@@ -83,29 +83,46 @@ export function createDbLookup(pool) {
       userId: row.user_id,
       ownerKind: row.owner_kind,
       ownerId: row.owner_id,
+      credentialId: row.credential_id ?? null,
     };
   };
 }
 
 /**
- * Lädt die in DB verschlüsselt persistierten OAuth-Credentials für einen
- * Owner und liefert (id, plaintext, expiresAt) zurück.
+ * Lädt die in DB verschlüsselt persistierten Credentials für eine Session
+ * und liefert eine diskriminierte Variante zurück:
+ *
+ *   { mode: 'oauth_claude', id, plaintext, expiresAt }
+ *   { mode: 'api_key',     id, provider, apiKey, baseUrl }
+ *
+ * Aufrufkonventionen:
+ *   - `credentialId` gesetzt → direktes Lookup auf llm_credentials.id.
+ *     Diese Spalte trägt die Session seit Session A. Schließt ab, dass
+ *     ein Owner mit mehreren Credentials (z.B. Anthropic api_key UND
+ *     Anthropic oauth_claude) gezielt auf eine bestimmte routet wird.
+ *   - Legacy: ohne `credentialId` fallen wir auf das alte Verhalten
+ *     zurück (latest enabled oauth_claude/anthropic für den Owner). So
+ *     funktionieren alte Tokens aus runner_sessions-Rows weiter, die vor
+ *     dem Schema-Bump gemintet wurden.
  *
  * RLS-aware: vor dem SELECT setzen wir `app.current_owner_kind/id` via
  * set_config(..., true) in einer Transaction, weil die llm_credentials-
  * Policy für die haex_claude_proxy-DB-Rolle auf diese Settings filtert.
  * Ohne SET findet der Query NICHTS, selbst wenn die Row existiert.
  *
- * Returns null, wenn kein authorisierter oauth_claude-Eintrag existiert.
+ * Returns null, wenn kein passendes Credential auffindbar/usable ist.
  */
 export function createCredentialsStore(pool, decrypt) {
   return {
-    async load(ownerKind, ownerId) {
+    async load(ownerKind, ownerId, credentialId = null) {
       if (ownerKind !== "user" && ownerKind !== "org") {
         throw new Error(`invalid ownerKind: ${ownerKind}`);
       }
       if (!UUID_REGEX.test(ownerId)) {
         throw new Error(`invalid ownerId (not a uuid): ${ownerId}`);
+      }
+      if (credentialId !== null && !UUID_REGEX.test(credentialId)) {
+        throw new Error(`invalid credentialId (not a uuid): ${credentialId}`);
       }
       const client = await pool.connect();
       try {
@@ -118,37 +135,72 @@ export function createCredentialsStore(pool, decrypt) {
           "SELECT set_config('app.current_owner_id', $1, true)",
           [ownerId],
         );
-        const res = await client.query(
-          `SELECT id,
-                  oauth_credentials_iv,
-                  oauth_credentials_tag,
-                  oauth_credentials_data,
-                  oauth_expires_at
-           FROM llm_credentials
-           WHERE owner_kind = $1
-             AND owner_id   = $2
-             AND provider   = 'anthropic'
-             AND mode       = 'oauth_claude'
-             AND enabled    = true
-             AND oauth_status = 'authorized'
-             AND oauth_credentials_data IS NOT NULL
-           ORDER BY updated_at DESC
-           LIMIT 1`,
-          [ownerKind, ownerId],
-        );
+        let res;
+        if (credentialId) {
+          res = await client.query(
+            `SELECT id, provider, mode, base_url, enabled, oauth_status,
+                    api_key_iv, api_key_tag, api_key_data,
+                    oauth_credentials_iv, oauth_credentials_tag,
+                    oauth_credentials_data, oauth_expires_at
+             FROM llm_credentials
+             WHERE id = $1
+             LIMIT 1`,
+            [credentialId],
+          );
+        } else {
+          res = await client.query(
+            `SELECT id, provider, mode, base_url, enabled, oauth_status,
+                    api_key_iv, api_key_tag, api_key_data,
+                    oauth_credentials_iv, oauth_credentials_tag,
+                    oauth_credentials_data, oauth_expires_at
+             FROM llm_credentials
+             WHERE owner_kind = $1
+               AND owner_id   = $2
+               AND provider   = 'anthropic'
+               AND mode       = 'oauth_claude'
+               AND enabled    = true
+               AND oauth_status = 'authorized'
+               AND oauth_credentials_data IS NOT NULL
+             ORDER BY updated_at DESC
+             LIMIT 1`,
+            [ownerKind, ownerId],
+          );
+        }
         await client.query("COMMIT");
         const row = res.rows[0];
         if (!row) return null;
-        const plaintext = decrypt({
-          iv: row.oauth_credentials_iv,
-          tag: row.oauth_credentials_tag,
-          data: row.oauth_credentials_data,
-        });
-        return {
-          id: row.id,
-          plaintext,
-          expiresAt: row.oauth_expires_at,
-        };
+        if (row.enabled === false) return null;
+        if (row.mode === "oauth_claude") {
+          if (row.oauth_status !== "authorized") return null;
+          if (!row.oauth_credentials_data) return null;
+          const plaintext = decrypt({
+            iv: row.oauth_credentials_iv,
+            tag: row.oauth_credentials_tag,
+            data: row.oauth_credentials_data,
+          });
+          return {
+            mode: "oauth_claude",
+            id: row.id,
+            plaintext,
+            expiresAt: row.oauth_expires_at,
+          };
+        }
+        if (row.mode === "api_key") {
+          if (!row.api_key_data) return null;
+          const apiKey = decrypt({
+            iv: row.api_key_iv,
+            tag: row.api_key_tag,
+            data: row.api_key_data,
+          });
+          return {
+            mode: "api_key",
+            id: row.id,
+            provider: row.provider,
+            apiKey,
+            baseUrl: row.base_url ?? null,
+          };
+        }
+        return null;
       } catch (err) {
         await client.query("ROLLBACK").catch(() => {});
         throw err;
