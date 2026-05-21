@@ -1,16 +1,36 @@
 # Generic Resolver Refactor — Implementation Plan
 
+> **Plan evolution (2026-05-21, mid-execution):** scope shifted from "Pg-resolver
+> as a builtin" to **"Pg-resolver as a standalone plugin"** so the proxy core can
+> be fully generic. Affected sections:
+>
+> - **Task 1.4 rewritten.** The pg-encrypted resolver no longer lives in this
+>   repo. It moved to `haex-claude-proxy-resolver-pg` (sibling repo). The
+>   dispatcher now treats any non-builtin `PROXY_RESOLVER` value as an NPM
+>   module name and loads it via dynamic `import()`.
+> - **Tasks 4.1 / 4.2 obsolete.** `src/auth.js`, `src/crypto.js`, and
+>   `test/auth.test.js` were deleted (not moved into a subfolder). `pg` is
+>   gone from `package.json` entirely (not made optional).
+> - **Phase 2.3 smoke** subsumed by the smoke check at the end of Phase 1.5.
+>
+> The phase-by-phase text below is the original plan; the *commit history* on
+> branch `refactor/generic-resolver` reflects the executed shape. See
+> `CHANGELOG.md` for the final architecture summary.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Decouple `haex-claude-proxy` from Specifyr's Postgres / RLS / crypto setup so it can run as a standalone single-user proxy (for the Hermes agent) **and** still serve Specifyr's multi-tenant flow via a pluggable resolver.
+**Goal (revised):** Make `haex-claude-proxy` a fully generic, plugin-driven proxy
+core. Builtin resolvers (`file`, `token-map`) cover the single-user and
+multi-token cases; the Specifyr Postgres + AES-GCM resolver ships separately as
+`haex-claude-proxy-resolver-pg`.
 
-**Architecture:** Extract the credential-resolution logic from `src/server.js` into a small interface (`Resolver.resolve(req) -> ResolverResult`). Ship three implementations: `FileResolver` (single-user, default), `TokenMapResolver` (static token→home mapping), and `PgEncryptedResolver` (today's Specifyr-flavoured logic, moved verbatim). Selection is driven by `PROXY_RESOLVER` env var; default is `file`. `pg` and the AES-256-GCM crypto helper become lazy-loaded so the Single-User mode has zero DB / Specifyr-key dependency.
+**Architecture:** Extract the credential-resolution logic from `src/server.js` into a small interface (`Resolver.resolve(req) -> ResolverResult`). Ship two builtin implementations in the core (`FileResolver` (default) and `TokenMapResolver`); external implementations (e.g. `haex-claude-proxy-resolver-pg`) are NPM modules loaded via dynamic `import()`. Selection is driven by `PROXY_RESOLVER` env var; default is `file`. The proxy core ends up with zero runtime dependencies.
 
-**Tech Stack:** Node.js ≥22 (ESM), built-in `node:test` for unit tests, `pg` only for the PgEncryptedResolver path (optional dep), `node:crypto` for the Specifyr-compatible AES-GCM.
+**Tech Stack:** Node.js ≥22 (ESM), built-in `node:test` for unit tests. No `pg` or crypto deps in core; those live in the plugin.
 
 **Out of scope:** Hermes itself. New endpoints. Format-translation changes. Changes to `cli-format.js` / `bufferedThenSSE` / streaming behaviour.
 
-**Compatibility constraint:** Existing Specifyr deploys keep working with `PROXY_RESOLVER=pg-encrypted` + the env vars they already set. No schema changes. No behaviour change in OAuth-token-refresh writeback.
+**Compatibility constraint:** Existing Specifyr deploys keep working by installing the `haex-claude-proxy-resolver-pg` plugin and setting `PROXY_RESOLVER=haex-claude-proxy-resolver-pg`. The plugin's env-var surface (`DATABASE_URL`, `SPECIFYR_SECRET_KEY`, `CREDENTIALS_ROOT`) is identical to today's proxy.
 
 ---
 
