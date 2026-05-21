@@ -8,7 +8,7 @@ The proxy core is generic — credential resolution is pluggable.
 
 ## How it works
 
-```
+```text
 client (--provider anthropic         this proxy               claude CLI
         ANTHROPIC_BASE_URL=                                   (uses OAuth)
         http://haex-claude-proxy)    POST /v1/messages   →    api.anthropic.com
@@ -38,7 +38,7 @@ Builtins ship with the proxy core. External resolvers are loaded via dynamic
 
 ### Available external resolvers
 
-- [`haex-claude-proxy-resolver-pg`](../haex-claude-proxy-resolver-pg/) — Postgres + AES-GCM. Tenant-aware credential store with RLS; resolves 64-hex session tokens against a `runner_sessions` table.
+- [`haex-claude-proxy-resolver-pg`](https://www.npmjs.com/package/haex-claude-proxy-resolver-pg) — Postgres + AES-GCM. Tenant-aware credential store with RLS; resolves 64-hex session tokens against a `runner_sessions` table.
 
 To use:
 

@@ -16,7 +16,7 @@
 > The phase-by-phase text below is the original plan; the *commit history* on
 > branch `refactor/generic-resolver` reflects the executed shape. See
 > `CHANGELOG.md` for the final architecture summary.
-
+>
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal (revised):** Make `haex-claude-proxy` a fully generic, plugin-driven proxy
@@ -80,7 +80,7 @@ Expected: "nothing to commit, working tree clean".
 
 **Step 1: Write the contract**
 
-```markdown
+````markdown
 # Resolver contract
 
 A Resolver is `{ name: string, resolve(req): Promise<ResolverResult> }`.
@@ -107,7 +107,7 @@ A Resolver is `{ name: string, resolve(req): Promise<ResolverResult> }`.
 Optional method: `writeback(ctx, refreshedPlaintext): Promise<void>` — called only
 when the spawn refreshed the OAuth token. Resolvers that don't persist
 credentials (e.g. `FileResolver` pointing at a writable home) can no-op.
-```
+````
 
 **Step 2: Commit**
 

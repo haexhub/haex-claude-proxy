@@ -418,7 +418,13 @@ async function handleMessages(req, res) {
     return errorResponse(res, 400, "invalid_request_error", validation.error);
   }
 
-  const ctx = await resolver.resolve(req);
+  let ctx;
+  try {
+    ctx = await resolver.resolve(req);
+  } catch (e) {
+    console.error("[proxy] resolver.resolve threw:", e);
+    return errorResponse(res, 500, "api_error", `resolver failure: ${e?.message ?? "unknown error"}`);
+  }
   if (ctx.error) {
     return errorResponse(res, ctx.error.status, ctx.error.type, ctx.error.message);
   }
@@ -475,7 +481,13 @@ async function handleChatCompletions(req, res) {
     return errorResponse(res, 400, "invalid_request_error", validation.error);
   }
 
-  const ctx = await resolver.resolve(req);
+  let ctx;
+  try {
+    ctx = await resolver.resolve(req);
+  } catch (e) {
+    console.error("[proxy] resolver.resolve threw:", e);
+    return errorResponse(res, 500, "api_error", `resolver failure: ${e?.message ?? "unknown error"}`);
+  }
   if (ctx.error) {
     return errorResponse(res, ctx.error.status, ctx.error.type, ctx.error.message);
   }

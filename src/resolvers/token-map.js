@@ -39,13 +39,19 @@ export async function create(env) {
     const raw = await fs.readFile(mapPath, "utf8");
     parsed = JSON.parse(raw);
   } catch (e) {
-    throw new Error(`failed to load PROXY_TOKEN_MAP at ${mapPath}: ${e.message}`);
+    throw new Error(
+      `failed to load PROXY_TOKEN_MAP at ${mapPath}: ${e.message}`,
+      { cause: e },
+    );
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
     throw new Error(
       `PROXY_TOKEN_MAP must be a JSON object of { token: { home } } entries`,
     );
   }
+  // Strip the prototype so request tokens like `__proto__` / `toString` can't
+  // resolve to inherited Object.prototype properties.
+  parsed = Object.assign(Object.create(null), parsed);
 
   return {
     name: "token-map",
