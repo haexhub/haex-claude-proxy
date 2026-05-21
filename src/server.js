@@ -298,7 +298,7 @@ function resolveForwardTarget(rawBase) {
   const host = parsed.hostname.toLowerCase();
   if (!ALLOWED_FORWARD_HOSTS.has(host)) {
     return {
-      error: `host '${host}' is not in PROXY_ALLOWED_FORWARD_HOSTS — refusing to forward`,
+      error: `host '${host}' is not in PROXY_ALLOWED_FORWARD_HOSTS - refusing to forward`,
     };
   }
   // Drop trailing slashes / paths beyond the origin so we always hit
@@ -449,7 +449,7 @@ async function handleMessages(req, res) {
     stdio: ["ignore", "pipe", "pipe"],
     env: envForHome(ctx.home),
   });
-  proc.on("close", () => { postSpawnCleanup(ctx); });
+  proc.on("close", () => { postSpawnCleanup(ctx).catch((e) => console.error("[proxy] postSpawnCleanup failed:", e.message)); });
 
   if (body.stream === true) {
     return bufferedThenSSE(proc, res, body.model);
@@ -485,7 +485,7 @@ async function handleChatCompletions(req, res) {
       res,
       400,
       "invalid_request_error",
-      "OpenAI-shape forwarding for api_key credentials is not implemented yet — use /v1/messages with an Anthropic credential",
+      "OpenAI-shape forwarding for api_key credentials is not implemented yet - use /v1/messages with an Anthropic credential",
     );
   }
 
@@ -496,7 +496,7 @@ async function handleChatCompletions(req, res) {
     stdio: ["ignore", "pipe", "pipe"],
     env: envForHome(ctx.home),
   });
-  proc.on("close", () => { postSpawnCleanup(ctx); });
+  proc.on("close", () => { postSpawnCleanup(ctx).catch((e) => console.error("[proxy] postSpawnCleanup failed:", e.message)); });
 
   if (body.stream === true) {
     return streamResponseOpenAI(proc, res, body.model);

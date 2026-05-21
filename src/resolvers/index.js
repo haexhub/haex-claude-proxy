@@ -4,10 +4,10 @@
  * the proxy core; any other value is treated as an NPM module name (or
  * an absolute import specifier) and loaded via dynamic `import()`.
  *
- * The proxy core intentionally only ships generic resolvers. Specifyr
- * Postgres + AES-GCM lives in the separate `haex-claude-proxy-
- * resolver-pg` package — install it and set `PROXY_RESOLVER=haex-
- * claude-proxy-resolver-pg`.
+ * The proxy core intentionally ships only generic resolvers. For
+ * Specifyr-flavoured Postgres + AES-GCM, install the separate
+ * `haex-claude-proxy-resolver-pg` package and set
+ * `PROXY_RESOLVER=haex-claude-proxy-resolver-pg`.
  *
  * Each resolver module exports a `create(env)` factory returning
  * `{ name, resolve, writeback? }`. The dispatcher awaits the factory
@@ -44,5 +44,14 @@ export async function createResolver(env = process.env) {
       `resolver module '${raw}' must export create(env) (got ${typeof factory})`,
     );
   }
-  return factory(env);
+  // Wrap the factory call so plugin boot-time errors carry a clear
+  // hint that they came from PROXY_RESOLVER, not the proxy core.
+  try {
+    return await factory(env);
+  } catch (err) {
+    throw new Error(
+      `resolver module '${raw}' create() failed: ${err.message}`,
+      { cause: err },
+    );
+  }
 }
