@@ -1,11 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createResolver } from "../src/resolvers/index.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+async function writeEmptyTokenMap() {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "hcp-tm-dispatch-"));
+  const file = path.join(dir, "tokens.json");
+  await fs.writeFile(file, "{}", "utf8");
+  return file;
+}
 
 test("createResolver returns a resolver with name=file by default", async () => {
   const r = await createResolver({ PROXY_RESOLVER: undefined });
@@ -19,7 +28,11 @@ test("createResolver routes file builtin", async () => {
 });
 
 test("createResolver routes token-map builtin", async () => {
-  const r = await createResolver({ PROXY_RESOLVER: "token-map" });
+  const PROXY_TOKEN_MAP = await writeEmptyTokenMap();
+  const r = await createResolver({
+    PROXY_RESOLVER: "token-map",
+    PROXY_TOKEN_MAP,
+  });
   assert.equal(r.name, "token-map");
 });
 
