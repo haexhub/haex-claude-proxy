@@ -67,3 +67,14 @@ test("createResolver throws when external module lacks create() export", async (
     /must export create\(env\)/,
   );
 });
+
+test("createResolver throws when external module returns a malformed resolver", async () => {
+  // Fixture's create(env) returns {} — no name, no resolve. The dispatcher
+  // should fail fast at boot instead of letting the server start and then
+  // crashing on the first request.
+  const fixture = path.join(__dirname, "fixtures", "fake-resolver-empty.js");
+  await assert.rejects(
+    () => createResolver({ PROXY_RESOLVER: fixture }),
+    /non-empty string 'name'/,
+  );
+});

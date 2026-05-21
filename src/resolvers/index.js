@@ -46,12 +46,28 @@ export async function createResolver(env = process.env) {
   }
   // Wrap the factory call so plugin boot-time errors carry a clear
   // hint that they came from PROXY_RESOLVER, not the proxy core.
+  let resolver;
   try {
-    return await factory(env);
+    resolver = await factory(env);
   } catch (err) {
     throw new Error(
-      `resolver module '${raw}' create() failed: ${err.message}`,
+      `resolver module '${raw}' create() failed: ${err?.message ?? String(err)}`,
       { cause: err },
     );
   }
+  // Fail fast against the documented resolver shape — otherwise a misbehaving
+  // plugin lets the server boot and surfaces only on the first request.
+  if (!resolver || typeof resolver !== "object") {
+    throw new Error(`resolver module '${raw}' create(env) must return an object`);
+  }
+  if (typeof resolver.name !== "string" || !resolver.name) {
+    throw new Error(`resolver module '${raw}' must return a non-empty string 'name'`);
+  }
+  if (typeof resolver.resolve !== "function") {
+    throw new Error(`resolver module '${raw}' must return a 'resolve(req)' function`);
+  }
+  if (resolver.writeback != null && typeof resolver.writeback !== "function") {
+    throw new Error(`resolver module '${raw}' 'writeback' must be a function when provided`);
+  }
+  return resolver;
 }
