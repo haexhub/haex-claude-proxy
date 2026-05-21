@@ -29,25 +29,19 @@
  *   GET  /v1/models/{id} Single-model lookup against the same list.
  *   GET  /healthz       Liveness check + a synthetic `claude --version`.
  *
- * Auth (multi-tenant only — no host fallback):
- *   - DATABASE_URL pointed at specifyr's Postgres is required. Without
- *     it every request returns 503.
- *   - SPECIFYR_SECRET_KEY (64 hex chars) must match specifyr's master
- *     key — the proxy decrypts oauth credentials with it on every
- *     request.
- *   - Each request MUST carry a 64-hex-char session token (minted by
- *     specifyr's runner_sessions table) via `x-api-key` or
- *     `Authorization: Bearer …`. Tokens that don't resolve → 401.
- *   - The resolver pulls the encrypted oauth blob from the
- *     `llm_credentials` table (RLS-aware: SET LOCAL app.current_owner_*),
- *     decrypts it in-process, and stages a per-request ephemeral HOME
- *     under CREDENTIALS_ROOT (default /run/credentials) — typically a
- *     tmpfs in production. The spawned `claude` CLI reads
- *     `$HOME/.claude/.credentials.json` from there. After exit we
- *     read the file back; if the CLI refreshed the token, we encrypt
- *     and write it to the DB, then remove the staging dir.
- *   - No bind-mounted credentials dir, no host `~/.claude` fallback,
- *     no plaintext credential on disk past process exit.
+ * Auth (pluggable resolver — see src/resolvers/):
+ *   - PROXY_RESOLVER picks the resolver implementation at boot
+ *     (default: 'file'). Builtins: 'file', 'token-map'. Any other
+ *     value is loaded as an npm module (e.g. the separate
+ *     `haex-claude-proxy-resolver-pg` package for multi-tenant
+ *     Postgres + AES-GCM).
+ *   - The resolver owns request → credentials mapping. The server
+ *     just stages the HOME the resolver returns, spawns claude, and
+ *     calls resolver.writeback() after exit so refreshed tokens can
+ *     be persisted.
+ *   - When the resolver returns `persistent: true`, HOME is treated
+ *     as its persistent store and the server skips the post-spawn
+ *     `rm -rf` step (otherwise the next request would 503).
  *
  * Streaming: when the request has `stream: true`, the proxy spawns claude
  * with `--output-format stream-json --include-partial-messages` and pipes the
@@ -60,8 +54,6 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 
-import pg from "pg";
-
 import {
   validateMessagesBody,
   anthropicMessagesToPrompt,
@@ -71,14 +63,7 @@ import {
   openAIBodyToAnthropic,
   anthropicToOpenAIResponse,
 } from "./cli-format.js";
-import {
-  createCredentialsStore,
-  createDbLookup,
-  extractSessionToken,
-  looksLikeSessionToken,
-  parseExpiresAt,
-} from "./auth.js";
-import { decrypt, encrypt } from "./crypto.js";
+import { createResolver } from "./resolvers/index.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -113,20 +98,12 @@ const AVAILABLE_MODELS = (() => {
   });
 })();
 
-// Wurzel für ephemere Per-Request-HOMEs. tmpfs-Mount (`/run/credentials`,
-// uid=1000, mode=0700, in-memory) wird vom ansible-compose bereitgestellt.
-// Pro Request: <root>/<spawn-id>/.claude/.credentials.json — gelöscht
-// nach Subprozess-Exit. KEIN Host-Bind, keine Persistenz.
-const CREDENTIALS_ROOT = process.env.CREDENTIALS_ROOT ?? "/run/credentials";
-
-// Lazy pg pool. DATABASE_URL is required — the proxy refuses to
-// resolve any inbound request without a working session-token lookup.
-const DATABASE_URL = process.env.DATABASE_URL ?? "";
-const pool = DATABASE_URL
-  ? new pg.Pool({ connectionString: DATABASE_URL, max: 5 })
-  : null;
-const lookupSession = pool ? createDbLookup(pool) : async () => null;
-const credentialsStore = pool ? createCredentialsStore(pool, decrypt) : null;
+// Resolver picked at boot via PROXY_RESOLVER (default: 'file'). The
+// dispatcher's create() is async because resolvers may do I/O at
+// startup (read a token map, connect a pool). Errors here surface
+// before the HTTP server starts listening — fail-fast on bad config.
+const resolver = await createResolver(process.env);
+console.log(`[haex-claude-proxy] resolver=${resolver.name}`);
 
 // Env handed to every spawned `claude`. We strip the parent's HOME
 // here so that handlers MUST resolve a per-request HOME — no
@@ -140,143 +117,30 @@ const SUBPROCESS_ENV_BASE = (() => {
 })();
 
 /**
- * Resolved per request:
- *   - oauth_claude → stages a tmpfs HOME with `.claude/.credentials.json`
- *     so the spawned claude CLI can pick the token up. Refreshed token
- *     gets persisted back after spawn exits.
- *   - api_key     → returns the decrypted upstream key + provider so the
- *     handler can forward the inbound request to the real upstream API
- *     instead of spawning `claude`. No HOME stage, nothing on disk.
- *
- * Auf Fehler: `{ error: { status, type, message } }` — Handler reicht
- * das als HTTP-Error weiter.
+ * After the spawned `claude` exits, give the resolver a chance to
+ * persist a refreshed token (if it changed), then `rm -rf` the
+ * staged HOME — EXCEPT when the resolver returned `persistent: true`,
+ * which means HOME is its persistent store and wiping it would 503
+ * the next request.
  */
-async function resolveRequestContext(req) {
-  if (!pool || !credentialsStore) {
-    return {
-      error: {
-        status: 503,
-        type: "configuration_error",
-        message:
-          "DATABASE_URL is unset — proxy cannot resolve session tokens",
-      },
-    };
-  }
-  const token = extractSessionToken(req);
-  if (!token || !looksLikeSessionToken(token)) {
-    return {
-      error: {
-        status: 401,
-        type: "authentication_error",
-        message:
-          "missing or malformed session token — agents must inject ANTHROPIC_API_KEY=<runner-session>",
-      },
-    };
-  }
-  const session = await lookupSession(token);
-  if (!session) {
-    return {
-      error: {
-        status: 401,
-        type: "authentication_error",
-        message:
-          "session token not recognised — unknown, expired, or revoked",
-      },
-    };
-  }
-  let cred;
-  try {
-    cred = await credentialsStore.load(
-      session.ownerKind,
-      session.ownerId,
-      session.credentialId,
-    );
-  } catch (e) {
-    return {
-      error: {
-        status: 500,
-        type: "api_error",
-        message: `credentials lookup failed: ${e.message}`,
-      },
-    };
-  }
-  if (!cred) {
-    return {
-      error: {
-        status: 401,
-        type: "authentication_error",
-        message:
-          "no usable credential for this session — re-run OAuth or re-bind the api_key in Specifyr",
-      },
-    };
-  }
-  if (cred.mode === "api_key") {
-    return {
-      mode: "api_key",
-      credId: cred.id,
-      provider: cred.provider,
-      apiKey: cred.apiKey,
-      baseUrl: cred.baseUrl,
-      ownerKind: session.ownerKind,
-      ownerId: session.ownerId,
-    };
-  }
-  // Ephemerer Spawn-Pfad: /run/credentials/<random>/.claude/.credentials.json
-  const spawnId = randomBytes(12).toString("hex");
-  const home = path.join(CREDENTIALS_ROOT, spawnId);
-  try {
-    await fsp.mkdir(path.join(home, ".claude"), { recursive: true, mode: 0o700 });
-    await fsp.writeFile(
-      path.join(home, ".claude", ".credentials.json"),
-      cred.plaintext,
-      { mode: 0o600 },
-    );
-  } catch (e) {
-    return {
-      error: {
-        status: 500,
-        type: "api_error",
-        message: `failed to stage credentials: ${e.message}`,
-      },
-    };
-  }
-  return {
-    mode: "oauth_claude",
-    home,
-    credId: cred.id,
-    ownerKind: session.ownerKind,
-    ownerId: session.ownerId,
-  };
-}
-
-/**
- * Nach Subprozess-Exit aufgerufen: liest `.credentials.json` nochmal —
- * falls die Claude-CLI während des Calls den Access-Token refresht hat,
- * landet der refreshte Blob hier. Schreibt verschlüsselt zurück in DB.
- *
- * Anschließend räumt cleanup() den tmpfs-Pfad weg. Beide Schritte sind
- * idempotent / no-throw — der Plaintext-Token verschwindet auf jeden
- * Fall aus dem RAM-FS, auch wenn DB-Writeback fehlschlägt (worst case:
- * der bisherige DB-Token bleibt unverändert, beim nächsten Spawn macht
- * claude erneut einen Refresh).
- */
-async function persistRefreshedTokenAndCleanup(ctx) {
-  if (!credentialsStore) return; // belt-and-braces — sollten wir nie erreichen
+async function postSpawnCleanup(ctx) {
   const credPath = path.join(ctx.home, ".claude", ".credentials.json");
+  let refreshed = null;
   try {
-    const refreshed = await fsp.readFile(credPath, "utf8");
-    if (refreshed && refreshed !== ctx.originalPlaintext) {
-      const expiresAt = parseExpiresAt(refreshed);
-      const encrypted = encrypt(refreshed);
-      await credentialsStore
-        .writeback(ctx.credId, ctx.ownerKind, ctx.ownerId, encrypted, expiresAt)
-        .catch((e) => console.error("[proxy] writeback failed:", e.message));
-    }
+    refreshed = await fsp.readFile(credPath, "utf8");
   } catch (e) {
     if (e.code !== "ENOENT") {
       console.error("[proxy] refresh-readback failed:", e.message);
     }
-  } finally {
+  }
+  if (refreshed && typeof resolver.writeback === "function") {
+    try {
+      await resolver.writeback(ctx, refreshed);
+    } catch (e) {
+      console.error("[proxy] resolver writeback failed:", e.message);
+    }
+  }
+  if (!ctx.persistent) {
     await fsp.rm(ctx.home, { recursive: true, force: true }).catch(() => {});
   }
 }
@@ -362,9 +226,9 @@ function handleHealthz(res) {
 // ────────────────────────────────────────────────────────────────────────────
 
 // The list is static and not per-account, so we serve it without
-// session-token resolution. This also keeps the model probe usable in
-// configurations that don't have DATABASE_URL wired up (e.g. local dev
-// with a single-user OAuth dir mounted directly at /credentials/...).
+// invoking the resolver. This also keeps the model probe usable in
+// configurations where the resolver would 503 (e.g. file resolver
+// without PROXY_CREDENTIALS_HOME).
 function handleListModels(req, res) {
   const data = AVAILABLE_MODELS.map((m) => ({ type: "model", ...m }));
   res.writeHead(200, { "content-type": "application/json" });
@@ -554,7 +418,7 @@ async function handleMessages(req, res) {
     return errorResponse(res, 400, "invalid_request_error", validation.error);
   }
 
-  const ctx = await resolveRequestContext(req);
+  const ctx = await resolver.resolve(req);
   if (ctx.error) {
     return errorResponse(res, ctx.error.status, ctx.error.type, ctx.error.message);
   }
@@ -581,21 +445,11 @@ async function handleMessages(req, res) {
   const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: null, streaming: false });
   console.log("[proxy] prompt_len=%d stream_requested=%s home=%s", promptText.length, body.stream, ctx.home);
 
-  // Originalen Plaintext mitschleifen, damit persistRefreshedTokenAndCleanup
-  // den DB-Write nur dann ausführt, wenn die Datei nach Spawn tatsächlich
-  // verändert wurde (Refresh-Detection per Inhalts-Vergleich).
-  try {
-    ctx.originalPlaintext = await fsp.readFile(
-      path.join(ctx.home, ".claude", ".credentials.json"),
-      "utf8",
-    );
-  } catch { ctx.originalPlaintext = ""; }
-
   const proc = spawn(CLAUDE_BIN, [...cliArgs, "--print", promptText], {
     stdio: ["ignore", "pipe", "pipe"],
     env: envForHome(ctx.home),
   });
-  proc.on("close", () => { persistRefreshedTokenAndCleanup(ctx); });
+  proc.on("close", () => { postSpawnCleanup(ctx); });
 
   if (body.stream === true) {
     return bufferedThenSSE(proc, res, body.model);
@@ -621,7 +475,7 @@ async function handleChatCompletions(req, res) {
     return errorResponse(res, 400, "invalid_request_error", validation.error);
   }
 
-  const ctx = await resolveRequestContext(req);
+  const ctx = await resolver.resolve(req);
   if (ctx.error) {
     return errorResponse(res, ctx.error.status, ctx.error.type, ctx.error.message);
   }
@@ -638,18 +492,11 @@ async function handleChatCompletions(req, res) {
   const { promptText, systemText } = anthropicMessagesToPrompt(body);
   const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: systemText, streaming: body.stream === true });
 
-  try {
-    ctx.originalPlaintext = await fsp.readFile(
-      path.join(ctx.home, ".claude", ".credentials.json"),
-      "utf8",
-    );
-  } catch { ctx.originalPlaintext = ""; }
-
   const proc = spawn(CLAUDE_BIN, [...cliArgs, "--print", promptText], {
     stdio: ["ignore", "pipe", "pipe"],
     env: envForHome(ctx.home),
   });
-  proc.on("close", () => { persistRefreshedTokenAndCleanup(ctx); });
+  proc.on("close", () => { postSpawnCleanup(ctx); });
 
   if (body.stream === true) {
     return streamResponseOpenAI(proc, res, body.model);
