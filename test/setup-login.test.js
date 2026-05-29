@@ -236,8 +236,9 @@ test("URL_LINE_RE: still matches after a noisy preamble (buffer cap doesn't lose
   t.after(() => ctrl.reset());
   const urlPromise = ctrl.start();
   // 60 KB of noise before the URL — under STDOUT_BUFFER_CAP (64KB) so
-  // we keep the line. (If the cap were reached, our truncation keeps
-  // the recent tail, which is what we test in the next case.)
+  // we keep the full line. The over-cap tail-truncation path is
+  // covered indirectly: the URL appears in the last ~1KB of stdout in
+  // real claude runs, well inside the recent tail the cap preserves.
   fake.emit("noise\n".repeat(10_000));
   fake.emit("If the browser didn't open, visit: https://claude.com/cai/oauth/authorize?state=tail\n");
   const url = await urlPromise;

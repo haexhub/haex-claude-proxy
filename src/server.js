@@ -49,7 +49,7 @@
  */
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
@@ -66,6 +66,7 @@ import {
 } from "./cli-format.js";
 import { createResolver } from "./resolvers/index.js";
 import { createSetupController } from "./setup-login.js";
+import { checkBearer, extractBearer } from "./setup-auth.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -120,6 +121,12 @@ console.log(`[haex-claude-proxy] resolver=${resolver.name}`);
 // Returns a clear 503 when token is set but node-pty couldn't load.
 // ────────────────────────────────────────────────────────────────────────────
 const SETUP_TOKEN = (process.env.PROXY_SETUP_TOKEN ?? "").trim();
+// Allow URL-safe alphanumerics + a few connector chars. We render the
+// token into a JS string literal in the served HTML, so anything
+// containing `"`, `\`, or a newline would corrupt the page. Validating
+// the shape here is the simple defense — `openssl rand -hex 32` (the
+// generator we document in roles/kodus/README.md) is well inside it.
+const SETUP_TOKEN_RE = /^[A-Za-z0-9._~-]{16,256}$/;
 const SETUP_HTML_PATH = (() => {
   const here = path.dirname(fileURLToPath(import.meta.url));
   return path.join(here, "setup-ui.html");
@@ -131,7 +138,11 @@ let setupDisabledReason = null;
 
 if (SETUP_TOKEN) {
   const credentialsHome = process.env.PROXY_CREDENTIALS_HOME;
-  if (!credentialsHome) {
+  if (!SETUP_TOKEN_RE.test(SETUP_TOKEN)) {
+    setupDisabledReason =
+      "PROXY_SETUP_TOKEN must match /^[A-Za-z0-9._~-]{16,256}$/ (URL-safe, no shell or JS-string special chars) — regenerate with `openssl rand -hex 32`";
+    console.warn(`[haex-claude-proxy] setup disabled: ${setupDisabledReason}`);
+  } else if (!credentialsHome) {
     setupDisabledReason =
       "PROXY_SETUP_TOKEN is set but PROXY_CREDENTIALS_HOME is unset — setup endpoints need somewhere to write credentials.json";
     console.warn(`[haex-claude-proxy] setup disabled: ${setupDisabledReason}`);
@@ -155,26 +166,16 @@ if (SETUP_TOKEN) {
 }
 
 /**
- * Constant-time bearer check. Returns true if the request carries a
- * matching `Authorization: Bearer <SETUP_TOKEN>` header OR a `?token=…`
- * query parameter (the query form is what lets the HTML link the user
- * clicks carry its own auth).
+ * Constant-time bearer check against SETUP_TOKEN. Accepts either an
+ * `Authorization: Bearer …` header OR a `?token=…` query parameter
+ * (latter is the bootstrap path so the operator can click a single
+ * URL with the token baked in). Delegates the actual comparison to
+ * checkBearer() in setup-auth.js where it can be unit-tested
+ * independently.
  */
 function checkSetupAuth(req) {
   if (!SETUP_TOKEN) return false;
-  const presented = (() => {
-    const h = req.headers["authorization"];
-    if (typeof h === "string" && h.startsWith("Bearer ")) {
-      return h.slice("Bearer ".length).trim();
-    }
-    const q = new URL(req.url, "http://internal").searchParams.get("token");
-    return q ? q.trim() : "";
-  })();
-  if (!presented) return false;
-  const a = Buffer.from(presented);
-  const b = Buffer.from(SETUP_TOKEN);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+  return checkBearer(extractBearer(req), SETUP_TOKEN);
 }
 
 // Env handed to every spawned `claude`. We strip the parent's HOME
@@ -271,6 +272,20 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.log(`[haex-claude-proxy] listening on http://${HOST}:${PORT}`);
 });
+
+// Graceful shutdown — tini delivers SIGTERM on `docker stop`, then
+// SIGKILL after the grace period. Resetting the setup controller
+// kills any in-flight `claude auth login` subprocess and clears the
+// 10-minute timeout that would otherwise keep the loop alive briefly.
+for (const sig of ["SIGTERM", "SIGINT"]) {
+  process.on(sig, () => {
+    console.log(`[haex-claude-proxy] received ${sig}, shutting down`);
+    try { setupController?.reset(); } catch { /* best-effort */ }
+    server.close(() => process.exit(0));
+    // Hard stop if connections linger past the grace window.
+    setTimeout(() => process.exit(0), 5000).unref();
+  });
+}
 
 // ────────────────────────────────────────────────────────────────────────────
 // /healthz
@@ -835,9 +850,12 @@ async function handleSetup(req, res, pathname) {
 
   if (req.method === "GET" && (sub === "" || sub === "index.html")) {
     // Render the HTML with the token injected so the page can re-bear
-    // it on its own fetch() calls. The token is also in the URL the
-    // user pasted, so this is no additional leak.
-    const body = setupHtmlCache.replace(/\{\{TOKEN\}\}/g, escapeHtmlAttr(SETUP_TOKEN));
+    // it on its own fetch() calls. SETUP_TOKEN was regex-validated at
+    // boot (URL-safe alphanumerics + `._~-`), so substituting it into
+    // the page's JS string literal `const TOKEN = "..."` and into the
+    // HTML attribute context inside the `?token=...` link are both
+    // safe by construction — no escaping needed.
+    const body = setupHtmlCache.replace(/\{\{TOKEN\}\}/g, SETUP_TOKEN);
     res.writeHead(200, {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
@@ -896,13 +914,3 @@ async function handleSetup(req, res, pathname) {
   res.end(JSON.stringify({ type: "error", error: { type: "not_found", message: `${req.method} ${pathname}` } }));
 }
 
-// Tiny HTML escaper for attribute context — the token is placed inside
-// a JS string literal, so we only need to escape characters that would
-// break out of "…" or </script>.
-function escapeHtmlAttr(s) {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/"/g, "&quot;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}

@@ -155,6 +155,14 @@ export function createSetupController({
   async function handlePtyExit({ exitCode }) {
     clearTimers();
     proc = null;
+    // Don't overwrite a prior ERROR. Common race: transitionToError
+    // (timeout / start-time failure) already killed the subprocess,
+    // whose exit handler now fires with exitCode=-1 — replacing the
+    // helpful "timed out" message with "exited with code -1" would
+    // confuse the operator.
+    if (state === States.ERROR) {
+      return;
+    }
     if (exitCode === 0) {
       // Credentials should be on disk now. Verify.
       const credPath = path.join(credentialsHome, ".claude", ".credentials.json");
@@ -223,11 +231,31 @@ export function createSetupController({
       stdoutBuf = "";
       startedAt = now();
 
+      // Set up promises FIRST so transitionToError can reject them if
+      // anything below throws. Without this an mkdir/spawn failure
+      // would leave state=AWAITING_URL with no urlPromise — the next
+      // start() call would spawn a second subprocess and orphan the
+      // first failure.
+      urlPromise = new Promise((resolve, reject) => {
+        urlResolve = resolve;
+        urlReject = reject;
+      });
+      finishPromise = new Promise((resolve, reject) => {
+        finishResolve = resolve;
+        finishReject = reject;
+      });
+      finishPromise.catch(() => {});
+
       // Ensure HOME exists. `claude` will create .claude/ inside, but
       // bombs out if HOME itself is missing. Done sync so callers can
       // emit data IMMEDIATELY after start() returns without missing
       // the onData wire-up that follows.
-      fs.mkdirSync(credentialsHome, { recursive: true });
+      try {
+        fs.mkdirSync(credentialsHome, { recursive: true });
+      } catch (e) {
+        transitionToError(`failed to mkdir ${credentialsHome}: ${e.message}`);
+        return urlPromise;
+      }
 
       try {
         proc = spawnPty(claudeBin, ["auth", "login", "--claudeai"], {
@@ -238,7 +266,7 @@ export function createSetupController({
         });
       } catch (e) {
         transitionToError(`failed to spawn claude CLI: ${e.message}`);
-        throw new Error(errorMessage);
+        return urlPromise;
       }
 
       proc.onData((chunk) => handlePtyData(String(chunk)));
@@ -257,20 +285,6 @@ export function createSetupController({
       timeoutHandle = setTimeout(() => {
         transitionToError(`setup-login timed out after ${timeoutMs}ms`);
       }, timeoutMs);
-
-      urlPromise = new Promise((resolve, reject) => {
-        urlResolve = resolve;
-        urlReject = reject;
-      });
-
-      finishPromise = new Promise((resolve, reject) => {
-        finishResolve = resolve;
-        finishReject = reject;
-      });
-      // Surface unhandled rejections — the server will await this when
-      // the user submits the code. If it errors before then, we just
-      // suppress the warning until the await.
-      finishPromise.catch(() => {});
 
       return urlPromise;
     },

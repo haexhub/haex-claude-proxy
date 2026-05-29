@@ -10,6 +10,10 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- The bootstrap URL carries the bearer in ?token=...; without this
+       meta the browser would leak the full URL (including the token)
+       as Referer when the user clicks the OAuth link. -->
+  <meta name="referrer" content="no-referrer">
   <title>haex-claude-proxy · setup</title>
   <style>
     :root {
@@ -91,7 +95,7 @@
     <p>Click the button below. A new tab opens at <code>claude.com</code> — log in with the Claude.ai account you want the proxy to use.</p>
     <button id="btn-start">Start login flow</button>
     <div id="oauth-url" class="url-display hidden"></div>
-    <a id="oauth-link" class="btn hidden" target="_blank" rel="noopener">Open Claude login →</a>
+    <a id="oauth-link" class="btn hidden" target="_blank" rel="noopener noreferrer">Open Claude login →</a>
   </div>
 
   <div id="step2" class="card hidden">
