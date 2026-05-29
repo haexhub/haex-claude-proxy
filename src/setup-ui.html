@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<!--
+  Served by GET /setup/ on haex-claude-proxy when PROXY_SETUP_TOKEN is
+  configured. Standalone single-file UI — no build step, no framework,
+  no external assets. The proxy substitutes the {{TOKEN}} placeholder at
+  send time so the page's JS can re-send the bearer on subsequent calls
+  without the user re-pasting it.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- The bootstrap URL carries the bearer in ?token=...; without this
+       meta the browser would leak the full URL (including the token)
+       as Referer when the user clicks the OAuth link. -->
+  <meta name="referrer" content="no-referrer">
+  <title>haex-claude-proxy · setup</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --fg: #e8e8e8;
+      --muted: #888;
+      --accent: #f97316;
+      --ok: #22c55e;
+      --err: #ef4444;
+      --card: #1a1d23;
+      --border: #2a2e36;
+    }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #fafafa; --fg: #1a1a1a; --muted: #666;
+        --card: #fff; --border: #e0e0e0;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 2rem 1rem;
+      font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: var(--bg); color: var(--fg);
+      max-width: 640px; margin-left: auto; margin-right: auto;
+    }
+    h1 { margin: 0 0 .25rem; font-size: 1.5rem; }
+    .sub { color: var(--muted); margin: 0 0 2rem; }
+    .card {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 8px; padding: 1.25rem; margin-bottom: 1rem;
+    }
+    .step-num {
+      display: inline-block; width: 1.5rem; height: 1.5rem;
+      background: var(--accent); color: #fff; border-radius: 50%;
+      text-align: center; font-size: .85rem; line-height: 1.5rem;
+      margin-right: .5rem;
+    }
+    .step-h { font-weight: 600; margin-bottom: .5rem; }
+    button, .btn {
+      display: inline-block; padding: .55rem 1rem;
+      background: var(--accent); color: #fff; border: none;
+      border-radius: 6px; font: inherit; cursor: pointer;
+      text-decoration: none;
+    }
+    button:disabled { opacity: .5; cursor: not-allowed; }
+    button.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+    input[type=text] {
+      width: 100%; padding: .55rem .75rem;
+      background: var(--bg); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 6px;
+      font: inherit; font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, monospace;
+    }
+    .status {
+      padding: .75rem 1rem; border-radius: 6px; margin-top: 1rem;
+      font-family: ui-monospace, "Cascadia Code", monospace; font-size: .9rem;
+    }
+    .status.ok  { background: rgba(34,197,94,.15);  color: var(--ok); border: 1px solid var(--ok); }
+    .status.err { background: rgba(239,68,68,.15);  color: var(--err); border: 1px solid var(--err); }
+    .hidden { display: none !important; }
+    .url-display {
+      word-break: break-all; font-family: ui-monospace, monospace;
+      font-size: .8rem; color: var(--muted); margin: .5rem 0;
+    }
+    footer { color: var(--muted); font-size: .85rem; margin-top: 2rem; text-align: center; }
+  </style>
+</head>
+<body>
+  <h1>haex-claude-proxy</h1>
+  <p class="sub">Web-driven <code>claude auth login</code> · stages OAuth credentials for the proxy</p>
+
+  <div id="existing-card" class="card hidden">
+    <div class="step-h">Already linked</div>
+    <p>Credentials are present at the configured home. Start a fresh login if your Claude account changed or the token refresh chain broke.</p>
+    <button class="secondary" id="btn-relink">Re-link anyway</button>
+  </div>
+
+  <div id="step1" class="card">
+    <div class="step-h"><span class="step-num">1</span> Open Anthropic OAuth</div>
+    <p>Click the button below. A new tab opens at <code>claude.com</code> — log in with the Claude.ai account you want the proxy to use.</p>
+    <button id="btn-start">Start login flow</button>
+    <div id="oauth-url" class="url-display hidden"></div>
+    <a id="oauth-link" class="btn hidden" target="_blank" rel="noopener noreferrer">Open Claude login →</a>
+  </div>
+
+  <div id="step2" class="card hidden">
+    <div class="step-h"><span class="step-num">2</span> Paste the authorization code</div>
+    <p>After login, Anthropic redirects to a page that shows a code. Copy it and paste below.</p>
+    <form id="code-form">
+      <input type="text" id="code-input" placeholder="paste code here" autocomplete="off" required>
+      <div style="margin-top: .75rem; display: flex; gap: .5rem;">
+        <button type="submit">Submit code</button>
+        <button type="button" class="secondary" id="btn-reset">Cancel</button>
+      </div>
+    </form>
+  </div>
+
+  <div id="status-box" class="status hidden"></div>
+
+  <footer>
+    Source: <a href="https://github.com/haexhub/haex-claude-proxy" target="_blank" rel="noopener">haex-claude-proxy</a>
+  </footer>
+
+  <script>
+    const TOKEN = "{{TOKEN}}";
+
+    // The bootstrap URL is shaped `?token=<bearer>` so a single link
+    // hands the operator a working session. Once the JS has read the
+    // value into TOKEN, scrub the query string so the bearer doesn't
+    // linger in the address bar / browser history / shared screenshot.
+    if (location.search.includes("token=")) {
+      history.replaceState(null, "", location.pathname + location.hash);
+    }
+
+    const $existing   = document.getElementById("existing-card");
+    const $relink     = document.getElementById("btn-relink");
+    const $step1      = document.getElementById("step1");
+    const $start      = document.getElementById("btn-start");
+    const $oauthUrl   = document.getElementById("oauth-url");
+    const $oauthLink  = document.getElementById("oauth-link");
+    const $step2      = document.getElementById("step2");
+    const $codeForm   = document.getElementById("code-form");
+    const $codeInput  = document.getElementById("code-input");
+    const $reset      = document.getElementById("btn-reset");
+    const $status     = document.getElementById("status-box");
+
+    function authHeader() {
+      return { Authorization: "Bearer " + TOKEN };
+    }
+
+    function showStatus(msg, kind = "ok") {
+      $status.textContent = msg;
+      $status.className = "status " + kind;
+      $status.classList.remove("hidden");
+    }
+
+    async function loadStatus() {
+      const r = await fetch("/setup/status", { headers: authHeader() });
+      if (!r.ok) {
+        showStatus("status check failed: " + r.status + " " + (await r.text()), "err");
+        return null;
+      }
+      return r.json();
+    }
+
+    async function refreshUI() {
+      const s = await loadStatus();
+      if (!s) return;
+      // `credentialsExist` is the durable signal — show the Re-link
+      // affordance whenever the file is on disk, regardless of whether
+      // the controller's transient state is idle (post-restart) or done
+      // (just finished). Without this branch covering "done", reloading
+      // after a successful login left the operator with an empty page
+      // and no way to start over.
+      if (s.credentialsExist && (s.state === "idle" || s.state === "done")) {
+        $existing.classList.remove("hidden");
+        $step1.classList.add("hidden");
+        $step2.classList.add("hidden");
+        if (s.state === "done") {
+          showStatus("Credentials linked. The proxy is ready to serve requests.", "ok");
+        }
+        return;
+      }
+      if (s.state === "awaiting-code" && s.oauthUrl) {
+        showOauthUrl(s.oauthUrl);
+        $step2.classList.remove("hidden");
+        return;
+      }
+      if (s.state === "error") {
+        showStatus("Last attempt errored: " + (s.errorMessage || "unknown"), "err");
+      }
+    }
+
+    function showOauthUrl(url) {
+      $oauthUrl.textContent = url;
+      $oauthUrl.classList.remove("hidden");
+      $oauthLink.href = url;
+      $oauthLink.classList.remove("hidden");
+      $start.classList.add("hidden");
+    }
+
+    $start.addEventListener("click", async () => {
+      $start.disabled = true;
+      showStatus("Spawning claude CLI…", "ok");
+      try {
+        const r = await fetch("/setup/login", {
+          method: "POST", headers: { ...authHeader(), "content-type": "application/json" },
+        });
+        const body = await r.json();
+        if (!r.ok) throw new Error(body.error || ("HTTP " + r.status));
+        showOauthUrl(body.oauthUrl);
+        $step2.classList.remove("hidden");
+        $status.classList.add("hidden");
+      } catch (e) {
+        showStatus("start failed: " + e.message, "err");
+        $start.disabled = false;
+      }
+    });
+
+    $codeForm.addEventListener("submit", async (ev) => {
+      ev.preventDefault();
+      const code = $codeInput.value.trim();
+      if (!code) return;
+      const $submitBtn = $codeForm.querySelector("button[type=submit]");
+      $submitBtn.disabled = true;
+      showStatus("Exchanging code… (this may take a few seconds)", "ok");
+      try {
+        const r = await fetch("/setup/code", {
+          method: "POST",
+          headers: { ...authHeader(), "content-type": "application/json" },
+          body: JSON.stringify({ code }),
+        });
+        const body = await r.json();
+        if (!r.ok) throw new Error(body.error || ("HTTP " + r.status));
+        showStatus("✓ Credentials written. The proxy is now ready.", "ok");
+        $step1.classList.add("hidden");
+        $step2.classList.add("hidden");
+      } catch (e) {
+        showStatus("code submission failed: " + e.message, "err");
+        $submitBtn.disabled = false;
+      }
+    });
+
+    $reset.addEventListener("click", async () => {
+      await fetch("/setup/reset", { method: "POST", headers: authHeader() });
+      location.reload();
+    });
+
+    $relink.addEventListener("click", () => {
+      $existing.classList.add("hidden");
+      $step1.classList.remove("hidden");
+    });
+
+    refreshUI();
+  </script>
+</body>
+</html>
