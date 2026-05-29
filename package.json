@@ -10,5 +10,8 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test test/*.test.js"
+  },
+  "optionalDependencies": {
+    "node-pty": "^1.1.0"
   }
 }

@@ -49,10 +49,11 @@
  */
 import http from "node:http";
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   validateMessagesBody,
@@ -64,6 +65,7 @@ import {
   anthropicToOpenAIResponse,
 } from "./cli-format.js";
 import { createResolver } from "./resolvers/index.js";
+import { createSetupController } from "./setup-login.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
@@ -104,6 +106,76 @@ const AVAILABLE_MODELS = (() => {
 // before the HTTP server starts listening — fail-fast on bad config.
 const resolver = await createResolver(process.env);
 console.log(`[haex-claude-proxy] resolver=${resolver.name}`);
+
+// ────────────────────────────────────────────────────────────────────────────
+// Web-driven setup flow (optional).
+//
+// Enabled when PROXY_SETUP_TOKEN is set AND node-pty loads. Exposes a
+// /setup/ HTML page + JSON endpoints that wrap `claude auth login`
+// interactively. The page lives in src/setup-ui.html; the controller
+// state machine in src/setup-login.js. See those files for details.
+//
+// Disabled silently when the token is absent (production deploys that
+// already have a credentials.json don't want a setup attack-surface).
+// Returns a clear 503 when token is set but node-pty couldn't load.
+// ────────────────────────────────────────────────────────────────────────────
+const SETUP_TOKEN = (process.env.PROXY_SETUP_TOKEN ?? "").trim();
+const SETUP_HTML_PATH = (() => {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  return path.join(here, "setup-ui.html");
+})();
+
+let setupController = null;
+let setupHtmlCache = null;
+let setupDisabledReason = null;
+
+if (SETUP_TOKEN) {
+  const credentialsHome = process.env.PROXY_CREDENTIALS_HOME;
+  if (!credentialsHome) {
+    setupDisabledReason =
+      "PROXY_SETUP_TOKEN is set but PROXY_CREDENTIALS_HOME is unset — setup endpoints need somewhere to write credentials.json";
+    console.warn(`[haex-claude-proxy] setup disabled: ${setupDisabledReason}`);
+  } else {
+    try {
+      const pty = await import("node-pty");
+      setupController = createSetupController({
+        spawnPty: pty.spawn,
+        credentialsHome,
+        claudeBin: CLAUDE_BIN,
+      });
+      setupHtmlCache = await fsp.readFile(SETUP_HTML_PATH, "utf8");
+      console.log(
+        `[haex-claude-proxy] setup endpoints enabled at /setup/ (credentialsHome=${credentialsHome})`,
+      );
+    } catch (e) {
+      setupDisabledReason = `node-pty unavailable: ${e.message}`;
+      console.warn(`[haex-claude-proxy] setup disabled: ${setupDisabledReason}`);
+    }
+  }
+}
+
+/**
+ * Constant-time bearer check. Returns true if the request carries a
+ * matching `Authorization: Bearer <SETUP_TOKEN>` header OR a `?token=…`
+ * query parameter (the query form is what lets the HTML link the user
+ * clicks carry its own auth).
+ */
+function checkSetupAuth(req) {
+  if (!SETUP_TOKEN) return false;
+  const presented = (() => {
+    const h = req.headers["authorization"];
+    if (typeof h === "string" && h.startsWith("Bearer ")) {
+      return h.slice("Bearer ".length).trim();
+    }
+    const q = new URL(req.url, "http://internal").searchParams.get("token");
+    return q ? q.trim() : "";
+  })();
+  if (!presented) return false;
+  const a = Buffer.from(presented);
+  const b = Buffer.from(SETUP_TOKEN);
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
+}
 
 // Env handed to every spawned `claude`. We strip the parent's HOME
 // here so that handlers MUST resolve a per-request HOME — no
@@ -179,6 +251,13 @@ const server = http.createServer(async (req, res) => {
   }
   if (req.method === "GET" && pathname.startsWith("/v1/models/")) {
     return handleGetModel(req, res, decodeURIComponent(pathname.slice("/v1/models/".length)));
+  }
+
+  // Setup flow (optional). All /setup/* routes require the bearer
+  // token, except when SETUP_TOKEN is unset (then they all 404 — the
+  // surface doesn't even exist).
+  if (pathname === "/setup" || pathname === "/setup/" || pathname.startsWith("/setup/")) {
+    return handleSetup(req, res, pathname);
   }
 
   // Catch-all logger so we can spot any other startup probes Claude Code
@@ -713,4 +792,117 @@ function readJsonBody(req) {
 function errorResponse(res, status, type, message) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify({ type: "error", error: { type, message } }));
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// /setup/* — web-driven `claude auth login` flow
+//
+// All routes require bearer auth (header or ?token=). Returns:
+//   GET  /setup/        → HTML page (substitutes the token so subsequent
+//                          fetch() calls can re-send it)
+//   GET  /setup/status  → JSON snapshot of the state machine
+//   POST /setup/login   → start the spawn, returns { oauthUrl }
+//   POST /setup/code    → submit the code copied off Anthropic's page,
+//                          resolves once credentials.json is on disk
+//   POST /setup/reset   → kill any in-flight flow, return to IDLE
+// ────────────────────────────────────────────────────────────────────────────
+
+async function handleSetup(req, res, pathname) {
+  if (!SETUP_TOKEN) {
+    // Surface absent — match the catch-all 404.
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ type: "error", error: { type: "not_found", message: `${req.method} ${req.url}` } }));
+    return;
+  }
+  if (!setupController) {
+    return errorResponse(
+      res,
+      503,
+      "configuration_error",
+      setupDisabledReason ?? "setup endpoints are not configured",
+    );
+  }
+  if (!checkSetupAuth(req)) {
+    res.writeHead(401, {
+      "content-type": "application/json",
+      "www-authenticate": "Bearer realm=\"haex-claude-proxy setup\"",
+    });
+    res.end(JSON.stringify({ type: "error", error: { type: "unauthorized", message: "valid PROXY_SETUP_TOKEN required" } }));
+    return;
+  }
+
+  const sub = pathname.replace(/^\/setup\/?/, "") || "";
+
+  if (req.method === "GET" && (sub === "" || sub === "index.html")) {
+    // Render the HTML with the token injected so the page can re-bear
+    // it on its own fetch() calls. The token is also in the URL the
+    // user pasted, so this is no additional leak.
+    const body = setupHtmlCache.replace(/\{\{TOKEN\}\}/g, escapeHtmlAttr(SETUP_TOKEN));
+    res.writeHead(200, {
+      "content-type": "text/html; charset=utf-8",
+      "cache-control": "no-store",
+    });
+    res.end(body);
+    return;
+  }
+
+  if (req.method === "GET" && sub === "status") {
+    const snap = setupController.snapshot();
+    const credentialsExist = await setupController.credentialsExist();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ...snap, credentialsExist }));
+    return;
+  }
+
+  if (req.method === "POST" && sub === "login") {
+    try {
+      const oauthUrl = await setupController.start();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ oauthUrl, state: setupController.snapshot().state }));
+    } catch (e) {
+      return errorResponse(res, 500, "setup_error", e.message);
+    }
+    return;
+  }
+
+  if (req.method === "POST" && sub === "code") {
+    let body;
+    try {
+      body = await readJsonBody(req);
+    } catch (e) {
+      return errorResponse(res, 400, "invalid_request_error", `invalid JSON body: ${e.message}`);
+    }
+    if (typeof body?.code !== "string" || !body.code.trim()) {
+      return errorResponse(res, 400, "invalid_request_error", "body.code must be a non-empty string");
+    }
+    try {
+      const result = await setupController.submitCode(body.code);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, credentialsPath: result.credentialsPath }));
+    } catch (e) {
+      return errorResponse(res, 500, "setup_error", e.message);
+    }
+    return;
+  }
+
+  if (req.method === "POST" && sub === "reset") {
+    setupController.reset();
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  res.writeHead(404, { "content-type": "application/json" });
+  res.end(JSON.stringify({ type: "error", error: { type: "not_found", message: `${req.method} ${pathname}` } }));
+}
+
+// Tiny HTML escaper for attribute context — the token is placed inside
+// a JS string literal, so we only need to escape characters that would
+// break out of "…" or </script>.
+function escapeHtmlAttr(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
