@@ -119,6 +119,14 @@
   <script>
     const TOKEN = "{{TOKEN}}";
 
+    // The bootstrap URL is shaped `?token=<bearer>` so a single link
+    // hands the operator a working session. Once the JS has read the
+    // value into TOKEN, scrub the query string so the bearer doesn't
+    // linger in the address bar / browser history / shared screenshot.
+    if (location.search.includes("token=")) {
+      history.replaceState(null, "", location.pathname + location.hash);
+    }
+
     const $existing   = document.getElementById("existing-card");
     const $relink     = document.getElementById("btn-relink");
     const $step1      = document.getElementById("step1");
@@ -153,19 +161,25 @@
     async function refreshUI() {
       const s = await loadStatus();
       if (!s) return;
-      if (s.credentialsExist && s.state === "idle") {
+      // `credentialsExist` is the durable signal — show the Re-link
+      // affordance whenever the file is on disk, regardless of whether
+      // the controller's transient state is idle (post-restart) or done
+      // (just finished). Without this branch covering "done", reloading
+      // after a successful login left the operator with an empty page
+      // and no way to start over.
+      if (s.credentialsExist && (s.state === "idle" || s.state === "done")) {
         $existing.classList.remove("hidden");
+        $step1.classList.add("hidden");
+        $step2.classList.add("hidden");
+        if (s.state === "done") {
+          showStatus("Credentials linked. The proxy is ready to serve requests.", "ok");
+        }
         return;
       }
       if (s.state === "awaiting-code" && s.oauthUrl) {
         showOauthUrl(s.oauthUrl);
         $step2.classList.remove("hidden");
         return;
-      }
-      if (s.state === "done") {
-        showStatus("Credentials linked. The proxy is ready to serve requests.", "ok");
-        $step1.classList.add("hidden");
-        $step2.classList.add("hidden");
       }
       if (s.state === "error") {
         showStatus("Last attempt errored: " + (s.errorMessage || "unknown"), "err");

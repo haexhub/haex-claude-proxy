@@ -19,6 +19,16 @@ test("checkBearer: length mismatch returns false (timingSafeEqual would throw wi
   assert.equal(checkBearer("much-longer-token", "short"), false);
 });
 
+test("checkBearer: non-ASCII presented bearer that would mismatch UTF-8 bytes returns false (no throw)", () => {
+  // "éé" has JS string length 2 but UTF-8 byte length 4. Without the
+  // byte-level check, the string-length test would match against a
+  // 2-char ASCII expected and then timingSafeEqual would throw.
+  assert.doesNotThrow(() => checkBearer("éé", "xx"));
+  assert.equal(checkBearer("éé", "xx"), false);
+  // Even if JS lengths match, bytes differ → false (no exception).
+  assert.equal(checkBearer("éx", "xy"), false);
+});
+
 test("checkBearer: empty strings return false", () => {
   assert.equal(checkBearer("", ""), false);
   assert.equal(checkBearer("", "expected"), false);

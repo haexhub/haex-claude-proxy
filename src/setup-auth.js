@@ -5,11 +5,17 @@ import { timingSafeEqual } from "node:crypto";
  * token. Returns false on any mismatch (including length differences,
  * missing/empty token, non-string input).
  *
- * `timingSafeEqual` requires equal-length inputs, so the explicit
- * length check above it is the gate. The length itself is therefore
- * NOT secret — but for a 64-hex (`openssl rand -hex 32`) token the
- * length is a public protocol constant, not a credential, so this is
- * the standard recommendation for HMAC-style bearer auth in Node.
+ * `timingSafeEqual` throws on length mismatch, so we gate on the
+ * UTF-8 byte length of the buffers rather than the JS string length
+ * (`.length` counts UTF-16 code units — `"é".length === 1` but
+ * `Buffer.from("é").length === 2`). The expected token is ASCII by
+ * construction (validated against /^[A-Za-z0-9._~-]+$/ at boot in
+ * server.js), so the only realistic vector here is a client sending
+ * a non-ASCII presented bearer — without the byte-level check, that
+ * would crash the worker with an uncaught exception, a trivial DoS.
+ *
+ * The length itself isn't secret — for a 64-hex token (`openssl rand
+ * -hex 32`) it's a public protocol constant, not a credential.
  *
  * Extracted into its own file so the server's HTTP layer can be tested
  * without dragging the full server.js init (resolver, node-pty dynamic
@@ -18,8 +24,10 @@ import { timingSafeEqual } from "node:crypto";
 export function checkBearer(presented, expected) {
   if (typeof presented !== "string" || typeof expected !== "string") return false;
   if (presented.length === 0 || expected.length === 0) return false;
-  if (presented.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(presented), Buffer.from(expected));
+  const presentedBuf = Buffer.from(presented, "utf8");
+  const expectedBuf = Buffer.from(expected, "utf8");
+  if (presentedBuf.length !== expectedBuf.length) return false;
+  return timingSafeEqual(presentedBuf, expectedBuf);
 }
 
 /**
