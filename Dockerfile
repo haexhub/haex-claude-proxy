@@ -52,6 +52,15 @@ EXPOSE 8080
 # The default `file` resolver expects PROXY_CREDENTIALS_HOME to point
 # at a host bind-mount; the optional /setup/login flow writes into
 # the same path when authoring a fresh login interactively.
-USER node
-ENTRYPOINT ["/usr/bin/tini", "--"]
+#
+# A fresh named volume (or empty bind-mount target) at that path is
+# created by Docker as root:root, mode 0755 — unwritable by the
+# non-root `node` user the app actually runs as (entrypoint drops
+# privileges after chowning). Without that chown, `claude auth login`
+# hangs indefinitely on a brand-new volume instead of failing fast or
+# succeeding — confirmed by direct testing. See docker-entrypoint.sh.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint.sh"]
 CMD ["node", "src/server.js"]
