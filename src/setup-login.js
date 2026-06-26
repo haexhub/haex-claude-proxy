@@ -131,6 +131,9 @@ export function createSetupController({
   }
 
   function handlePtyData(chunk) {
+    if (process.env.DEBUG_SETUP_LOGIN) {
+      console.log(`[setup-login] data (${chunk.length}b):`, JSON.stringify(chunk));
+    }
     if (stdoutBuf.length + chunk.length > STDOUT_BUFFER_CAP) {
       // Truncate from the front to keep recent output. We only need
       // the URL match, which appears once near the top.
@@ -153,6 +156,9 @@ export function createSetupController({
   }
 
   async function handlePtyExit({ exitCode }) {
+    if (process.env.DEBUG_SETUP_LOGIN) {
+      console.log(`[setup-login] pty exit, code=${exitCode}, state=${state}, buf_tail=${JSON.stringify(stdoutBuf.slice(-300))}`);
+    }
     clearTimers();
     proc = null;
     // Don't overwrite a prior ERROR. Common race: transitionToError
@@ -304,6 +310,10 @@ export function createSetupController({
         throw new Error("code must be a non-empty string");
       }
       state = States.FINISHING;
+      if (process.env.DEBUG_SETUP_LOGIN) {
+        const trimmed = code.trim();
+        console.log(`[setup-login] submitCode: len=${trimmed.length} hasHash=${trimmed.includes("#")} tail=${JSON.stringify(trimmed.slice(-8))}`);
+      }
       // The CLI's readline prompt expects the pasted code followed by a
       // newline. node-pty doesn't auto-append.
       proc.write(`${code.trim()}\r`);
