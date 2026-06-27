@@ -544,15 +544,12 @@ async function handleMessages(req, res) {
     return forwardAnthropicMessages(req, res, body, ctx);
   }
 
-  const { promptText } = anthropicMessagesToPrompt(body);
+  const { promptText, systemText } = anthropicMessagesToPrompt(body);
   // Always use non-streaming internally: --output-format stream-json requires
   // --verbose which creates ~35K cache tokens per call (charged as "extra
   // usage" on subscription). Non-streaming reads from the warm cache instead.
-  //
-  // System prompt is embedded in promptText (not passed via --append-system-prompt)
-  // to avoid cache-creation "extra usage" tokens — see anthropicMessagesToPrompt.
   const jsonSchema = extractOutputToolSchema(body);
-  const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: null, streaming: false, jsonSchema });
+  const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: systemText, streaming: false, jsonSchema });
   console.log("[proxy] prompt_len=%d stream_requested=%s home=%s", promptText.length, body.stream, ctx.home);
 
   // Serialize claude invocations sharing this credential HOME — see
