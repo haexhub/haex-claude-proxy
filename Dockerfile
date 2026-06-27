@@ -29,9 +29,15 @@ RUN apt-get update \
 
 # `claude` CLI lives globally so the spawned subprocess can be invoked
 # by name. Pin to a specific minor version — 2.1.126 broke --print
-# --output-format json (exits 0 with no output); bump only after
-# verifying against the smoke test.
-RUN npm install -g @anthropic-ai/claude-code@2.1.121
+# --output-format json (exits 0 with no output); that regression is
+# confirmed fixed by 2.1.191 (verified directly: real --print --output-format
+# json call returns proper JSON, exit 0). Separately, 2.1.121 itself turned
+# out to be too old for Anthropic's current `claude auth login --claudeai`
+# OAuth UX — the CLI would print the authorize URL and then hang forever,
+# never reaching the "paste code" prompt, both interactively and via PTY
+# automation; 2.1.191 reaches the prompt immediately. Bump only after
+# verifying both: the --print/json regression and a real OAuth login.
+RUN npm install -g @anthropic-ai/claude-code@2.1.191
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
