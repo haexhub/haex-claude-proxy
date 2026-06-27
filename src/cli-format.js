@@ -90,14 +90,48 @@ export function flattenContent(content) {
 }
 
 /**
- * Build the argv (excluding the trailing `--print PROMPT`) for spawning the
- * `claude` subprocess. Tools are intentionally disabled — the model surfaces
- * tool intents as content blocks but won't execute anything.
+ * pydantic-ai's (and other structured-output callers') default name for the
+ * synthetic "tool" used to force a schema-conforming final answer. Function
+ * tools the agent itself defines (for the model to call mid-reasoning, e.g.
+ * a search tool) are NOT this — only the output tool is.
+ */
+const OUTPUT_TOOL_NAME = "final_result";
+
+/**
+ * Find the output-tool schema in a Messages-API request's `tools`, if any.
+ * Returns `null` when the request didn't ask for structured output (no tool
+ * named `final_result`) — callers should skip `--json-schema` in that case.
  *
- * @param {{model: string, systemPrompt: string|null, streaming: boolean}} opts
+ * Only the *output* tool is extracted here. Other tools in the same request
+ * (e.g. a `search_web` function tool meant for the model to call and get a
+ * result back) are still dropped — this proxy has no multi-turn tool_use ⇄
+ * tool_result loop; see buildClaudeArgs's docstring.
+ */
+export function extractOutputToolSchema(body) {
+  const tool = body?.tools?.find((t) => t?.name === OUTPUT_TOOL_NAME);
+  return tool?.input_schema ?? null;
+}
+
+/**
+ * Build the argv (excluding the trailing `--print PROMPT`) for spawning the
+ * `claude` subprocess.
+ *
+ * Function tools (the agent's own, e.g. a search tool the model can call
+ * mid-reasoning and get a result back) are intentionally disabled via
+ * `--allowed-tools ""` — that needs a real multi-turn tool_use ⇄ tool_result
+ * loop this single-shot `--print` wrapper doesn't implement. The model
+ * surfaces such tool intents as plain content blocks but nothing executes
+ * them.
+ *
+ * The *output* tool (structured final-result schema, e.g. pydantic-ai's
+ * `output_type=`) is different: it doesn't need a round trip, so it's wired
+ * through natively via `--json-schema` when the caller passes `jsonSchema`
+ * (see `extractOutputToolSchema`).
+ *
+ * @param {{model: string, systemPrompt: string|null, streaming: boolean, jsonSchema?: object|null}} opts
  * @returns {string[]}
  */
-export function buildClaudeArgs({ model, systemPrompt, streaming }) {
+export function buildClaudeArgs({ model, systemPrompt, streaming, jsonSchema = null }) {
   const args = [
     "--no-session-persistence",
     "--allowed-tools", "",
@@ -114,6 +148,9 @@ export function buildClaudeArgs({ model, systemPrompt, streaming }) {
   if (effectiveSystem) {
     args.push("--append-system-prompt", effectiveSystem);
   }
+  if (jsonSchema) {
+    args.push("--json-schema", JSON.stringify(jsonSchema));
+  }
   return args;
 }
 
@@ -124,17 +161,29 @@ export function buildClaudeArgs({ model, systemPrompt, streaming }) {
  * Surfaces cache-token usage fields (`cache_creation_input_tokens`,
  * `cache_read_input_tokens`) — these dominate cost reporting and are part
  * of the public Anthropic API.
+ *
+ * When the call was made with `--json-schema` (see `buildClaudeArgs`), the
+ * CLI returns a parsed `structured_output` field alongside `result`. That
+ * gets surfaced as a `tool_use` content block named `final_result` — the
+ * shape pydantic-ai (and similar structured-output callers) expect instead
+ * of plain text, matching the CLI's own `stop_reason: "tool_use"` for that
+ * case.
  */
 export function claudeJsonToAnthropic(claudeOut, model) {
   const resultText = typeof claudeOut.result === "string" ? claudeOut.result : "";
   const u = claudeOut.usage ?? {};
+
+  const content =
+    claudeOut.structured_output !== undefined
+      ? [{ type: "tool_use", id: `toolu_${randomUUID().replace(/-/g, "")}`, name: OUTPUT_TOOL_NAME, input: claudeOut.structured_output }]
+      : [{ type: "text", text: resultText }];
 
   return {
     id: `msg_${randomUUID().replace(/-/g, "")}`,
     type: "message",
     role: "assistant",
     model,
-    content: [{ type: "text", text: resultText }],
+    content,
     stop_reason: claudeOut.stop_reason ?? "end_turn",
     stop_sequence: null,
     usage: {

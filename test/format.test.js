@@ -10,6 +10,7 @@ import {
   flattenContent,
   buildClaudeArgs,
   claudeJsonToAnthropic,
+  extractOutputToolSchema,
   mapClaudeStreamEvent,
 } from "../src/cli-format.js";
 
@@ -144,6 +145,31 @@ test("anthropicMessagesToPrompt: emits null systemText when no system", () => {
   assert.equal(systemText, null);
 });
 
+// ───── extractOutputToolSchema ─────
+
+test("extractOutputToolSchema: finds the final_result tool's schema", () => {
+  const schema = { type: "object", properties: { title: { type: "string" } } };
+  const r = extractOutputToolSchema({
+    tools: [
+      { name: "search_web_tool", input_schema: { type: "object" } },
+      { name: "final_result", input_schema: schema },
+    ],
+  });
+  assert.deepEqual(r, schema);
+});
+
+test("extractOutputToolSchema: returns null when no final_result tool present", () => {
+  assert.equal(
+    extractOutputToolSchema({ tools: [{ name: "search_web_tool", input_schema: {} }] }),
+    null,
+  );
+});
+
+test("extractOutputToolSchema: returns null when tools is missing/empty", () => {
+  assert.equal(extractOutputToolSchema({}), null);
+  assert.equal(extractOutputToolSchema({ tools: [] }), null);
+});
+
 // ───── buildClaudeArgs ─────
 
 test("buildClaudeArgs: non-streaming uses json output, no partial-messages", () => {
@@ -169,6 +195,19 @@ test("buildClaudeArgs: includes system prompt when provided", () => {
   const args = buildClaudeArgs({ model: "x", systemPrompt: "Be concise.", streaming: false });
   const idx = args.indexOf("--append-system-prompt");
   assert.equal(args[idx + 1], "Be concise.");
+});
+
+test("buildClaudeArgs: omits --json-schema when no schema given", () => {
+  const args = buildClaudeArgs({ model: "x", systemPrompt: null, streaming: false });
+  assert.ok(!args.includes("--json-schema"));
+});
+
+test("buildClaudeArgs: passes --json-schema as a JSON string when given", () => {
+  const schema = { type: "object", properties: { title: { type: "string" } } };
+  const args = buildClaudeArgs({ model: "x", systemPrompt: null, streaming: false, jsonSchema: schema });
+  const idx = args.indexOf("--json-schema");
+  assert.ok(idx >= 0);
+  assert.deepEqual(JSON.parse(args[idx + 1]), schema);
 });
 
 // ───── claudeJsonToAnthropic ─────
@@ -216,6 +255,25 @@ test("claudeJsonToAnthropic: id is fresh msg_<uuid>", () => {
   const r2 = claudeJsonToAnthropic({ result: "x", usage: {} }, "x");
   assert.match(r1.id, /^msg_[0-9a-f]{32}$/);
   assert.notEqual(r1.id, r2.id);
+});
+
+test("claudeJsonToAnthropic: structured_output becomes a final_result tool_use block", () => {
+  const structured = { title: "Asian-Aligned Reversion", asset_class: "FOREX" };
+  const r = claudeJsonToAnthropic(
+    { result: JSON.stringify(structured), structured_output: structured, stop_reason: "tool_use", usage: {} },
+    "x",
+  );
+  assert.equal(r.content.length, 1);
+  assert.equal(r.content[0].type, "tool_use");
+  assert.equal(r.content[0].name, "final_result");
+  assert.match(r.content[0].id, /^toolu_[0-9a-f]{32}$/);
+  assert.deepEqual(r.content[0].input, structured);
+  assert.equal(r.stop_reason, "tool_use");
+});
+
+test("claudeJsonToAnthropic: falls back to a text block when structured_output is absent", () => {
+  const r = claudeJsonToAnthropic({ result: "plain text", usage: {} }, "x");
+  assert.deepEqual(r.content, [{ type: "text", text: "plain text" }]);
 });
 
 // ───── mapClaudeStreamEvent ─────

@@ -16,10 +16,17 @@
  * Endpoints:
  *   POST /v1/messages   Anthropic Messages API. Translates Anthropic body to
  *                       a `claude` invocation and translates the response back.
- *                       Tools defined in the request are passed through as
- *                       `tool_use` content blocks; the model returns intents,
- *                       claude (run with `--allowed-tools ""`) does NOT execute
- *                       them — execution stays with the original caller.
+ *                       A request's structured-output tool (named
+ *                       `final_result`, e.g. pydantic-ai's `output_type=`) is
+ *                       wired through natively via `--json-schema`, and the
+ *                       result comes back as a `tool_use` content block.
+ *                       Other, caller-defined function tools (meant for the
+ *                       model to call mid-reasoning and get a result back)
+ *                       are NOT wired through — that needs a multi-turn
+ *                       tool_use ⇄ tool_result loop this single-shot
+ *                       `--print` wrapper doesn't implement; claude runs with
+ *                       `--allowed-tools ""` and the model just never sees
+ *                       those tool definitions at all.
  *   GET  /v1/models     Static list of OAuth-account-available models. Claude
  *                       Code 2.1+ probes this on startup; without it every
  *                       `--model X` fails with a misleading "may not exist"
@@ -60,6 +67,7 @@ import {
   anthropicMessagesToPrompt,
   buildClaudeArgs,
   claudeJsonToAnthropic,
+  extractOutputToolSchema,
   mapClaudeStreamEvent,
   openAIBodyToAnthropic,
   anthropicToOpenAIResponse,
@@ -542,7 +550,8 @@ async function handleMessages(req, res) {
   //
   // System prompt is embedded in promptText (not passed via --append-system-prompt)
   // to avoid cache-creation "extra usage" tokens — see anthropicMessagesToPrompt.
-  const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: null, streaming: false });
+  const jsonSchema = extractOutputToolSchema(body);
+  const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: null, streaming: false, jsonSchema });
   console.log("[proxy] prompt_len=%d stream_requested=%s home=%s", promptText.length, body.stream, ctx.home);
 
   const proc = spawn(CLAUDE_BIN, [...cliArgs, "--print", promptText], {
