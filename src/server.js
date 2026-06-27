@@ -72,6 +72,7 @@ import {
   openAIBodyToAnthropic,
   anthropicToOpenAIResponse,
 } from "./cli-format.js";
+import { acquireHomeLock } from "./home-lock.js";
 import { createResolver } from "./resolvers/index.js";
 import { createSetupController } from "./setup-login.js";
 import { checkBearer, extractBearer } from "./setup-auth.js";
@@ -554,11 +555,20 @@ async function handleMessages(req, res) {
   const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: null, streaming: false, jsonSchema });
   console.log("[proxy] prompt_len=%d stream_requested=%s home=%s", promptText.length, body.stream, ctx.home);
 
+  // Serialize claude invocations sharing this credential HOME — see
+  // home-lock.js for why (the CLI's own token-refresh-and-save has no
+  // locking; concurrent invocations against an expired token corrupt
+  // credentials.json).
+  const releaseHomeLock = await acquireHomeLock(ctx.home);
   const proc = spawn(CLAUDE_BIN, [...cliArgs, "--print", promptText], {
     stdio: ["ignore", "pipe", "pipe"],
     env: envForHome(ctx.home),
   });
-  proc.on("close", () => { postSpawnCleanup(ctx).catch((e) => console.error("[proxy] postSpawnCleanup failed:", e.message)); });
+  proc.on("close", () => {
+    postSpawnCleanup(ctx)
+      .catch((e) => console.error("[proxy] postSpawnCleanup failed:", e.message))
+      .finally(releaseHomeLock);
+  });
 
   if (body.stream === true) {
     return bufferedThenSSE(proc, res, body.model);
@@ -607,11 +617,18 @@ async function handleChatCompletions(req, res) {
   const { promptText, systemText } = anthropicMessagesToPrompt(body);
   const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: systemText, streaming: body.stream === true });
 
+  // Serialize claude invocations sharing this credential HOME — see
+  // home-lock.js / the matching comment in handleMessages.
+  const releaseHomeLock = await acquireHomeLock(ctx.home);
   const proc = spawn(CLAUDE_BIN, [...cliArgs, "--print", promptText], {
     stdio: ["ignore", "pipe", "pipe"],
     env: envForHome(ctx.home),
   });
-  proc.on("close", () => { postSpawnCleanup(ctx).catch((e) => console.error("[proxy] postSpawnCleanup failed:", e.message)); });
+  proc.on("close", () => {
+    postSpawnCleanup(ctx)
+      .catch((e) => console.error("[proxy] postSpawnCleanup failed:", e.message))
+      .finally(releaseHomeLock);
+  });
 
   if (body.stream === true) {
     return streamResponseOpenAI(proc, res, body.model);
