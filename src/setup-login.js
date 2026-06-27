@@ -155,7 +155,18 @@ export function createSetupController({
     }
   }
 
-  async function handlePtyExit({ exitCode }) {
+  async function handlePtyExit({ exitCode, forProc }) {
+    // `reset()` (or a fresh start() before this exit event fires) may have
+    // already replaced/cleared `proc` — this exit event belongs to a
+    // subprocess we no longer care about. Without this check, cancelling
+    // an in-flight login race-clobbers the freshly-reset IDLE state with a
+    // stale "exited with code 129" (killed) error a moment later.
+    if (forProc !== proc) {
+      if (process.env.DEBUG_SETUP_LOGIN) {
+        console.log(`[setup-login] pty exit from a stale/replaced subprocess (code=${exitCode}) — ignoring`);
+      }
+      return;
+    }
     if (process.env.DEBUG_SETUP_LOGIN) {
       console.log(`[setup-login] pty exit, code=${exitCode}, state=${state}, buf_tail=${JSON.stringify(stdoutBuf.slice(-300))}`);
     }
@@ -275,6 +286,7 @@ export function createSetupController({
         return urlPromise;
       }
 
+      const spawnedProc = proc;
       proc.onData((chunk) => handlePtyData(String(chunk)));
       proc.onExit((evt) => {
         // node-pty's onExit fires with {exitCode, signal}; some shims
@@ -285,7 +297,7 @@ export function createSetupController({
             : typeof evt?.exitCode === "number"
               ? evt.exitCode
               : -1;
-        handlePtyExit({ exitCode });
+        handlePtyExit({ exitCode, forProc: spawnedProc });
       });
 
       timeoutHandle = setTimeout(() => {

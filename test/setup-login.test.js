@@ -183,6 +183,49 @@ test("controller: reset() returns to IDLE and kills any in-flight subprocess", a
   assert.equal(fake.isKilled(), true);
 });
 
+test("controller: a killed subprocess's late exit event doesn't clobber a reset() back to ERROR", async () => {
+  // Real incident: cancelling an in-flight login calls reset(), which kills
+  // the subprocess and sets state=IDLE — but the kill is async, so the
+  // subprocess's own onExit (non-zero, "killed") can fire AFTER reset()
+  // already moved on. Without a staleness check, that late exit clobbers
+  // the freshly-reset IDLE state with a confusing "exited with code 129"
+  // error.
+  const home = await mkHomeDir();
+  const fake = makeFakePty();
+  const ctrl = createSetupController({ spawnPty: () => fake, credentialsHome: home });
+  const urlPromise = ctrl.start();
+  ctrl.reset();
+  await assert.rejects(urlPromise, /reset/);
+  assert.equal(ctrl.snapshot().state, States.IDLE);
+
+  fake.exit(129); // late-arriving exit from the subprocess reset() killed
+
+  assert.equal(ctrl.snapshot().state, States.IDLE, "stale exit must not override reset()");
+  assert.equal(ctrl.snapshot().errorMessage, null);
+});
+
+test("controller: a killed subprocess's late exit doesn't affect a subsequent start()", async (t) => {
+  const home = await mkHomeDir();
+  const fakeA = makeFakePty();
+  const fakeB = makeFakePty();
+  let calls = 0;
+  const ctrl = createSetupController({
+    spawnPty: () => (calls++ === 0 ? fakeA : fakeB),
+    credentialsHome: home,
+  });
+  t.after(() => ctrl.reset()); // fakeB's start() is left in-flight below — clear its timeout
+
+  const urlPromiseA = ctrl.start();
+  ctrl.reset();
+  await assert.rejects(urlPromiseA, /reset/);
+  const urlPromiseB = ctrl.start(); // a fresh subprocess (fakeB) is now in flight
+  urlPromiseB.catch(() => {}); // t.after's reset() rejects this too — not what this test checks
+
+  fakeA.exit(129); // stale exit from the first (reset/killed) subprocess
+
+  assert.equal(ctrl.snapshot().state, States.AWAITING_URL, "stale exit from fakeA must not affect fakeB's flow");
+});
+
 test("controller: idempotent start() while AWAITING_URL doesn't spawn twice", async (t) => {
   const home = await mkHomeDir();
   let spawnCount = 0;
