@@ -1,6 +1,6 @@
 {
   "name": "haex-claude-proxy",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Generic Anthropic-API-compatible HTTP proxy that wraps `claude` CLI as a subprocess to use Claude Pro/Max OAuth tokens. Pluggable credential resolvers (builtins: file, token-map; external: any NPM module).",
   "type": "module",
   "private": true,
