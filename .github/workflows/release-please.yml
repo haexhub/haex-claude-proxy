@@ -1,0 +1,89 @@
+name: Release Please
+
+# Triggered on every push to `main`. Two modes:
+#   1. No release-worthy commits since the last tag -> no-op.
+#   2. Release-worthy commits exist -> open/update a "chore(release): vX.Y.Z"
+#      PR on main with the package.json version bump and CHANGELOG.md.
+#      Merging that PR tags the merge commit as vX.Y.Z, which build-image.yml's
+#      existing `push: tags: ["v*"]` trigger picks up to build and push the
+#      Docker image - no separate build job needed here.
+#
+# Branch model: feature branches -> PR -> develop -> PR -> main -> release.
+# `main` only moves via release-please's own PR, a develop->main PR, or a
+# hotfix/* branch (see enforce-main-base.yml). After each release, the
+# sync-to-develop job opens a PR bringing the version bump back into develop.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      - name: Run release-please
+        id: release
+        uses: googleapis/release-please-action@v5.0.0
+        with:
+          # PAT (not GITHUB_TOKEN) so the tag this action pushes actually
+          # fires build-image.yml's tag trigger. GitHub's anti-recursion rule
+          # suppresses workflow runs for events produced by GITHUB_TOKEN -
+          # without a PAT, merging the release PR would tag the repo but
+          # never trigger the Docker build.
+          token: ${{ secrets.RELEASE_PAT }}
+          config-file: .release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: main
+
+  # After a release, main carries the version bump + CHANGELOG that develop
+  # does not. Open a sync PR so develop stays in lock-step with main.
+  sync-to-develop:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v7
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT }}
+
+      - name: Open sync PR to develop
+        env:
+          NEW_VERSION: ${{ needs.release-please.outputs.version }}
+          GH_TOKEN: ${{ secrets.RELEASE_PAT }}
+        run: |
+          SYNC_BRANCH="sync-develop/v${NEW_VERSION}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$SYNC_BRANCH"
+          git push origin "$SYNC_BRANCH"
+
+          PR_URL=$(gh pr create \
+            --base develop \
+            --head "$SYNC_BRANCH" \
+            --title "chore: sync develop with v${NEW_VERSION} release" \
+            --body "Brings version bumps from the v${NEW_VERSION} release (CHANGELOG.md, package.json) back into develop.")
+          PR_NUMBER=$(echo "$PR_URL" | grep -oE '[0-9]+$')
+
+          # Merge commit (NOT squash): a squash gives develop the bumps as a
+          # fresh commit without main's release commit in its ancestry, so the
+          # next develop->main PR shows up as "BEHIND" and needs a manual
+          # back-merge. A merge commit keeps main's tip reachable from
+          # develop, so develop stays in lock-step.
+          gh pr merge "$PR_NUMBER" --merge --auto || \
+            echo "::warning::Auto-merge enable failed for sync PR #${PR_NUMBER}. PR remains open for manual review."
