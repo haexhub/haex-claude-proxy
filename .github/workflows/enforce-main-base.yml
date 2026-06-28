@@ -1,0 +1,61 @@
+name: Enforce develop-first
+
+# Hard gate for PRs targeting `main`. Feature work belongs on `develop`;
+# `main` is updated only by release-please, sync PRs, and (in the rare case
+# of an actual hotfix) the explicit `hotfix/*` lane.
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  enforce-main-base:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Check PR head branch is allowed to target main
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # Bootstrap exemption: a PR that only touches this workflow file
+          # itself can target main from any branch - otherwise the workflow
+          # could never be installed in the first place.
+          BOOTSTRAP_PATHS_REGEX='^\.github/workflows/enforce-main-base\.yml$'
+          CHANGED=$(git diff --name-only "$BASE_SHA".."$HEAD_SHA")
+          echo "Changed files in this PR:"
+          echo "$CHANGED" | sed 's/^/  /'
+          if [ -n "$CHANGED" ] && ! echo "$CHANGED" | grep -vE "$BOOTSTRAP_PATHS_REGEX" > /dev/null; then
+            echo "::notice::Bootstrap PR detected - head-branch allowlist skipped."
+            exit 0
+          fi
+
+          # Allowlist for branches that may target main:
+          #   develop               -> the gitflow release path (develop -> main)
+          #   release-please--*     -> release-please's own release PRs
+          #   sync-*                -> sync PRs created by release-please.yml
+          #   hotfix/*               -> urgent production hotfixes
+          case "$HEAD_REF" in
+            develop|release-please--*|sync-*|hotfix/*)
+              echo "::notice::PR head '$HEAD_REF' is permitted to target main"
+              ;;
+            *)
+              echo "::error::Feature/fix PRs must target 'develop', not 'main'."
+              echo "::error::Head branch '$HEAD_REF' is not on the main allowlist."
+              echo "::error::Allowed patterns: develop | release-please--* | sync-* | hotfix/*"
+              echo "::error::Retarget this PR to 'develop' (gh pr edit --base develop)."
+              exit 1
+              ;;
+          esac
