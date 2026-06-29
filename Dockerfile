@@ -17,7 +17,7 @@
 # PROXY_CREDENTIALS_HOME without ever SSH-ing into the box. Requires
 # node-pty (optional dependency built at image-build time).
 
-FROM node:22-bookworm-slim
+FROM node:26-bookworm-slim
 
 # Build-time deps for node-pty's native build (python3 + make + g++).
 # Runtime deps for the proxy itself (ca-certificates + curl + tini).
