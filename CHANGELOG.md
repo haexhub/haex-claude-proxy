@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/haexhub/haex-claude-proxy/compare/v0.4.0...v0.5.0) (2026-07-20)
+
+
+### Features
+
+* expose authenticated account info on /setup/status ([eae7bed](https://github.com/haexhub/haex-claude-proxy/commit/eae7bed177e20b12af3d7511e1047c8032b1601a))
+
 ## [0.4.0](https://github.com/haexhub/haex-claude-proxy/compare/v0.3.0...v0.4.0) (2026-06-28)
 
 
