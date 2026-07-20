@@ -75,6 +75,7 @@ import {
 import { acquireHomeLock } from "./home-lock.js";
 import { createResolver } from "./resolvers/index.js";
 import { createSetupController } from "./setup-login.js";
+import { createAccountInfoReader } from "./account-info.js";
 import { checkBearer, extractBearer } from "./setup-auth.js";
 
 const PORT = Number(process.env.PORT ?? 8080);
@@ -144,9 +145,12 @@ const SETUP_HTML_PATH = (() => {
 let setupController = null;
 let setupHtmlCache = null;
 let setupDisabledReason = null;
+let setupCredentialsHome = null;
+const accountInfoReader = createAccountInfoReader();
 
 if (SETUP_TOKEN) {
   const credentialsHome = process.env.PROXY_CREDENTIALS_HOME;
+  setupCredentialsHome = credentialsHome;
   if (!SETUP_TOKEN_RE.test(SETUP_TOKEN)) {
     setupDisabledReason =
       "PROXY_SETUP_TOKEN must match /^[A-Za-z0-9._~-]{16,256}$/ (URL-safe, no shell or JS-string special chars) — regenerate with `openssl rand -hex 32`";
@@ -890,8 +894,11 @@ async function handleSetup(req, res, pathname) {
   if (req.method === "GET" && sub === "status") {
     const snap = setupController.snapshot();
     const credentialsExist = await setupController.credentialsExist();
+    const accountInfo = credentialsExist
+      ? await accountInfoReader.get(setupCredentialsHome)
+      : null;
     res.writeHead(200, { "content-type": "application/json" });
-    res.end(JSON.stringify({ ...snap, credentialsExist }));
+    res.end(JSON.stringify({ ...snap, credentialsExist, accountInfo }));
     return;
   }
 
