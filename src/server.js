@@ -68,6 +68,7 @@ import {
   anthropicMessagesToPrompt,
   anthropicMessagesToImagePrompt,
   hasImageBlocks,
+  hasCallerPathMention,
   buildClaudeArgs,
   claudeJsonToAnthropic,
   extractOutputToolSchema,
@@ -558,6 +559,19 @@ async function handleMessages(req, res) {
   // path as text-only requests, no separate code path needed.
   let imageFiles = [];
   if (hasImageBlocks(body)) {
+    // Image requests skip the <turn> wrapper that keeps `@path` mentions from
+    // being resolved by the CLI (see anthropicMessagesToImagePrompt). An
+    // `@path` mention in caller text would therefore be read as a real local
+    // file — arbitrary file disclosure. Only the proxy's own injected temp
+    // mentions are legitimate; reject any in caller text.
+    if (hasCallerPathMention(body)) {
+      return errorResponse(
+        res,
+        400,
+        "invalid_request_error",
+        "image requests must not contain an '@path' file mention in text content",
+      );
+    }
     try {
       imageFiles = materializeImageBlocks(body);
     } catch (e) {
@@ -618,18 +632,25 @@ const IMAGE_MEDIA_TYPE_EXT = {
  */
 function materializeImageBlocks(body) {
   const paths = [];
-  for (const m of body.messages) {
-    if (!Array.isArray(m.content)) continue;
-    for (const block of m.content) {
-      if (block?.type !== "image" || block.source?.type !== "base64") continue;
-      if (typeof block.source.data !== "string" || block.source.data.length === 0) {
-        throw new Error("image block source.data must be a non-empty base64 string");
+  try {
+    for (const m of body.messages) {
+      if (!Array.isArray(m.content)) continue;
+      for (const block of m.content) {
+        if (block?.type !== "image" || block.source?.type !== "base64") continue;
+        if (typeof block.source.data !== "string" || block.source.data.length === 0) {
+          throw new Error("image block source.data must be a non-empty base64 string");
+        }
+        const ext = IMAGE_MEDIA_TYPE_EXT[block.source.media_type] ?? "bin";
+        const filePath = path.join(os.tmpdir(), `hcp-image-${randomBytes(8).toString("hex")}.${ext}`);
+        fs.writeFileSync(filePath, Buffer.from(block.source.data, "base64"));
+        paths.push(filePath);
       }
-      const ext = IMAGE_MEDIA_TYPE_EXT[block.source.media_type] ?? "bin";
-      const filePath = path.join(os.tmpdir(), `hcp-image-${randomBytes(8).toString("hex")}.${ext}`);
-      fs.writeFileSync(filePath, Buffer.from(block.source.data, "base64"));
-      paths.push(filePath);
     }
+  } catch (e) {
+    // A later block threw after earlier ones were already written — the caller
+    // never receives these paths, so unlink them here rather than leak them.
+    for (const p of paths) fs.rmSync(p, { force: true });
+    throw e;
   }
   return paths;
 }

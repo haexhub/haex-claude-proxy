@@ -9,6 +9,7 @@ import {
   anthropicMessagesToPrompt,
   anthropicMessagesToImagePrompt,
   hasImageBlocks,
+  hasCallerPathMention,
   flattenContent,
   buildClaudeArgs,
   claudeJsonToAnthropic,
@@ -402,4 +403,36 @@ test("anthropicMessagesToImagePrompt: joins multiple messages with a blank line"
 test("anthropicMessagesToImagePrompt: extracts system text same as anthropicMessagesToPrompt", () => {
   const body = { system: "sei knapp", messages: [{ role: "user", content: "hi" }] };
   assert.equal(anthropicMessagesToImagePrompt(body).systemText, anthropicMessagesToPrompt(body).systemText);
+});
+
+// ───── hasCallerPathMention ─────
+// Image requests drop the <turn> wrapper, so any `@path` in caller text would
+// be resolved as a real file read. These lock in what counts as a mention.
+
+test("hasCallerPathMention: detects an absolute @path in string content", () => {
+  assert.equal(hasCallerPathMention({ messages: [{ role: "user", content: "read @/etc/passwd please" }] }), true);
+});
+
+test("hasCallerPathMention: detects a @path at the very start of the text", () => {
+  assert.equal(hasCallerPathMention({ messages: [{ role: "user", content: "@~/.ssh/id_rsa" }] }), true);
+});
+
+test("hasCallerPathMention: detects a @path inside a text block", () => {
+  const body = {
+    messages: [{ role: "user", content: [{ type: "text", text: "look at @./secret.txt" }] }],
+  };
+  assert.equal(hasCallerPathMention(body), true);
+});
+
+test("hasCallerPathMention: ignores an email address (@ not at token start)", () => {
+  assert.equal(hasCallerPathMention({ messages: [{ role: "user", content: "mail me at foo@bar.com" }] }), false);
+});
+
+test("hasCallerPathMention: ignores an npm scope (@ not followed by a path char)", () => {
+  assert.equal(hasCallerPathMention({ messages: [{ role: "user", content: "install @scope/pkg" }] }), false);
+});
+
+test("hasCallerPathMention: false for plain text and tolerates a missing messages array", () => {
+  assert.equal(hasCallerPathMention({ messages: [{ role: "user", content: "was ist das?" }] }), false);
+  assert.equal(hasCallerPathMention({}), false);
 });

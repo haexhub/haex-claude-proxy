@@ -103,6 +103,40 @@ export function hasImageBlocks(body) {
   );
 }
 
+// An `@path` file mention: `@` starting a whitespace-delimited token and
+// immediately followed by a path-like char (`/` absolute, `~` home, `.`
+// relative). Deliberately narrow so it does NOT match `user@host`,
+// `@scope/pkg`, or CSS `@media` — only things the CLI would resolve as a file.
+const PATH_MENTION_RE = /(^|\s)@[/~.]/;
+
+/**
+ * True if any caller-supplied text carries an `@path` file mention.
+ *
+ * Image requests skip the `<turn role="…">` wrapper (see
+ * anthropicMessagesToImagePrompt) that otherwise makes the CLI treat `@path`
+ * mentions as quoted/untrusted and refuse to read them. Without that wrapper,
+ * a mention anywhere in the caller's text would be resolved by the CLI as a
+ * real file read — arbitrary local-file disclosure into the model context
+ * (e.g. `@/home/user/.claude/.credentials.json`). The proxy only ever injects
+ * its own temp-file mentions; a mention in caller text is rejected upstream
+ * before the prompt is built.
+ */
+export function hasCallerPathMention(body) {
+  for (const m of body.messages ?? []) {
+    const c = m.content;
+    if (typeof c === "string") {
+      if (PATH_MENTION_RE.test(c)) return true;
+      continue;
+    }
+    if (!Array.isArray(c)) continue;
+    for (const b of c) {
+      if (typeof b === "string" && PATH_MENTION_RE.test(b)) return true;
+      if (b?.type === "text" && typeof b.text === "string" && PATH_MENTION_RE.test(b.text)) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Reduce a content value (string OR array of typed blocks) to a single string.
  */
