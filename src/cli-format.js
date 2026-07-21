@@ -69,6 +69,75 @@ export function anthropicMessagesToPrompt(body) {
 }
 
 /**
+ * Like anthropicMessagesToPrompt, but WITHOUT the `<turn role="…">` wrapper —
+ * used for image-bearing requests, where a message's flattened text contains
+ * an `@path` mention (see server.js's materializeImageBlocks).
+ *
+ * Verified empirically against the real CLI: an `@path` mention embedded
+ * inside `<turn role="user">…</turn>` makes the CLI treat it as quoted/untrusted
+ * content and refuse to read the file, replying with a request for
+ * permission instead — which `--print` can never satisfy (non-interactive).
+ * The same mention in plain, unwrapped text resolves correctly as a real
+ * vision attachment every time. Multi-turn role distinction isn't needed for
+ * the single-shot image use case this serves, so messages are joined with a
+ * blank line instead.
+ */
+export function anthropicMessagesToImagePrompt(body) {
+  const systemText = body.system != null ? flattenContent(body.system) : null;
+  const promptText = body.messages.map((m) => flattenContent(m.content)).join("\n\n");
+  return { promptText, systemText };
+}
+
+/**
+ * True if any message carries an `image` content block. Such requests can't go
+ * through flattenContent as-is — it would `JSON.stringify` the image block
+ * into the prompt, so the model receives a base64 blob as text and never sees
+ * an actual image. The server materializes these blocks to temp files and
+ * rewrites them to `@path` text mentions (which the CLI resolves as real
+ * vision input) before building the prompt — see server.js's
+ * materializeImageBlocks.
+ */
+export function hasImageBlocks(body) {
+  return (body.messages ?? []).some(
+    (m) => Array.isArray(m.content) && m.content.some((b) => b?.type === "image"),
+  );
+}
+
+// An `@path` file mention: `@` starting a whitespace-delimited token and
+// immediately followed by a path-like char (`/` absolute, `~` home, `.`
+// relative). Deliberately narrow so it does NOT match `user@host`,
+// `@scope/pkg`, or CSS `@media` — only things the CLI would resolve as a file.
+const PATH_MENTION_RE = /(^|\s)@[/~.]/;
+
+/**
+ * True if any caller-supplied text carries an `@path` file mention.
+ *
+ * Image requests skip the `<turn role="…">` wrapper (see
+ * anthropicMessagesToImagePrompt) that otherwise makes the CLI treat `@path`
+ * mentions as quoted/untrusted and refuse to read them. Without that wrapper,
+ * a mention anywhere in the caller's text would be resolved by the CLI as a
+ * real file read — arbitrary local-file disclosure into the model context
+ * (e.g. `@/home/user/.claude/.credentials.json`). The proxy only ever injects
+ * its own temp-file mentions; a mention in caller text is rejected upstream
+ * before the prompt is built.
+ */
+export function hasCallerPathMention(body) {
+  for (const m of body.messages ?? []) {
+    const c = m.content;
+    if (typeof c === "string") {
+      if (PATH_MENTION_RE.test(c)) return true;
+      continue;
+    }
+    if (!Array.isArray(c)) continue;
+    for (const b of c) {
+      if (typeof b === "string" && PATH_MENTION_RE.test(b)) return true;
+      if (b?.type === "text" && typeof b.text === "string" && PATH_MENTION_RE.test(b.text)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Reduce a content value (string OR array of typed blocks) to a single string.
  */
 export function flattenContent(content) {

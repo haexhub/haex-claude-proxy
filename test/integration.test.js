@@ -14,12 +14,21 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   buildClaudeArgs,
   claudeJsonToAnthropic,
   mapClaudeStreamEvent,
+  anthropicMessagesToImagePrompt,
 } from "../src/cli-format.js";
+
+// A 32×32 solid-red PNG — small enough to inline, distinctive enough to assert
+// the model actually saw it rather than guessed.
+const RED_PNG_B64 =
+  "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAOklEQVR4nO3RQREAQAjDwHIa8K8MMSchfPhlBZSZUNOdS+90PR5Y8AfIRMhEyETIRMhEyETIRMhEIR/gIwFENf1lpQAAAABJRU5ErkJggg==";
 
 const E2E = process.env.CLAUDE_PROXY_E2E === "1";
 const MAYBE = E2E ? test : test.skip;
@@ -83,4 +92,41 @@ MAYBE("integration: --output-format stream-json emits unwrappable Anthropic even
   assert.ok(eventTypes.includes("message_start"), "missing message_start");
   assert.ok(eventTypes.includes("content_block_delta"), "missing content_block_delta");
   assert.ok(eventTypes.includes("message_stop"), "missing message_stop");
+});
+
+MAYBE("integration: image referenced via @path reaches the model as real vision", async (t) => {
+  // Mirrors server.js's materializeImageBlocks + anthropicMessagesToImagePrompt:
+  // write the base64 image to a temp file, substitute an @path text mention
+  // for the image block, and flatten WITHOUT the <turn role="…"> wrapper —
+  // the CLI resolves the mention as a real vision attachment. Same cheap
+  // non-streaming --output-format json path as text-only requests.
+  //
+  // Two approaches were ruled out empirically before landing on this one:
+  // - `--input-format stream-json` + stdin: flaky (3 repeated runs — one
+  //   silently dropped the image, another failed with
+  //   "error_during_execution") even though it worked most of the time.
+  // - @path mention inside anthropicMessagesToPrompt's normal <turn
+  //   role="user">…</turn> wrapper: the CLI treats content inside that
+  //   wrapper as quoted/untrusted and refuses to read the file, replying
+  //   with a request for interactive permission instead — which --print can
+  //   never satisfy. Reproduced 100% reliably; only removing the wrapper
+  //   fixed it.
+  // This @path-without-wrapper approach was reliable across 6+ repeated runs
+  // with two different images (including a multi-color, multi-text one) and
+  // correctly read rendered text out of the image, not just the dominant color.
+  const dir = await mkdtemp(join(tmpdir(), "hcp-vision-e2e-"));
+  const imgPath = join(dir, "test.png");
+  await writeFile(imgPath, Buffer.from(RED_PNG_B64, "base64"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const { promptText } = anthropicMessagesToImagePrompt({
+    messages: [{ role: "user", content: `Reply with only the dominant color word of this image: @${imgPath}` }],
+  });
+  const args = buildClaudeArgs({ model: TEST_MODEL, systemPrompt: null, streaming: false });
+  const { stdout } = await runClaude(args, promptText);
+  const parsed = JSON.parse(stdout);
+  const mapped = claudeJsonToAnthropic(parsed, TEST_MODEL);
+  const text = (mapped.content[0]?.text ?? "").toLowerCase();
+  t.diagnostic(`model saw: ${text}`);
+  assert.match(text, /red|rot/, "model did not identify the image as red — vision not wired through");
 });
