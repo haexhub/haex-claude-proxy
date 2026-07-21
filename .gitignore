@@ -6,3 +6,8 @@ tmp/
 !.env.example
 .DS_Store
 .worktrees/
+
+# Per-contributor tooling — kept local, never shared.
+CLAUDE.md
+.claude/
+graphify-out/
