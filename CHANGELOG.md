@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.5.1](https://github.com/haexhub/haex-claude-proxy/compare/v0.5.0...v0.5.1) (2026-07-21)
+
+
+### Bug Fixes
+
+* **vision:** close two [@path](https://github.com/path) scan gaps + reject non-base64 image sources ([dc3325c](https://github.com/haexhub/haex-claude-proxy/commit/dc3325c2cbed902eace00d9f29290518b3cf77e2))
+* **vision:** reject [@path](https://github.com/path) file mentions in caller text; plug temp-file leak ([1f6f9e4](https://github.com/haexhub/haex-claude-proxy/commit/1f6f9e4af9e60e7e61ed6018c0c1f953e94b4c8a))
+
 ## [0.5.0](https://github.com/haexhub/haex-claude-proxy/compare/v0.4.0...v0.5.0) (2026-07-20)
 
 
