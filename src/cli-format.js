@@ -109,32 +109,47 @@ export function hasImageBlocks(body) {
 // `@scope/pkg`, or CSS `@media` — only things the CLI would resolve as a file.
 const PATH_MENTION_RE = /(^|\s)@[/~.]/;
 
+// Deep-walk any value reachable from `body.system` / `body.messages`, testing
+// every string leaf. Mirrors the reach of flattenContent — it recurses into
+// tool_result.content and JSON.stringify's unknown blocks — so we can't check
+// just `type:"text"` blocks at the top level. Also covers `body.system`
+// (extracted the same way for image and non-image paths).
+function anyStringMatches(v, re) {
+  if (v == null) return false;
+  if (typeof v === "string") return re.test(v);
+  if (typeof v !== "object") return false;
+  if (Array.isArray(v)) {
+    for (const item of v) if (anyStringMatches(item, re)) return true;
+    return false;
+  }
+  for (const key of Object.keys(v)) {
+    if (anyStringMatches(v[key], re)) return true;
+  }
+  return false;
+}
+
 /**
  * True if any caller-supplied text carries an `@path` file mention.
  *
  * Image requests skip the `<turn role="…">` wrapper (see
  * anthropicMessagesToImagePrompt) that otherwise makes the CLI treat `@path`
  * mentions as quoted/untrusted and refuse to read them. Without that wrapper,
- * a mention anywhere in the caller's text would be resolved by the CLI as a
- * real file read — arbitrary local-file disclosure into the model context
- * (e.g. `@/home/user/.claude/.credentials.json`). The proxy only ever injects
- * its own temp-file mentions; a mention in caller text is rejected upstream
+ * a mention anywhere the CLI ends up seeing would be resolved as a real file
+ * read — arbitrary local-file disclosure into the model context (e.g.
+ * `@/home/user/.claude/.credentials.json`). The proxy only ever injects its
+ * own temp-file mentions; a mention in caller text is rejected upstream
  * before the prompt is built.
+ *
+ * Scans both `body.system` and `body.messages`, and recurses into every
+ * string leaf — flattenContent inlines `tool_result.content` verbatim and
+ * joins blocks with `\n`, so a mention nested inside a `tool_result` (or any
+ * other block whose string content ends up in the flat prompt) is just as
+ * live as one in a top-level text block. Deep walk keeps the scanner honest
+ * against whatever shape the API accepts today or tomorrow.
  */
 export function hasCallerPathMention(body) {
-  for (const m of body.messages ?? []) {
-    const c = m.content;
-    if (typeof c === "string") {
-      if (PATH_MENTION_RE.test(c)) return true;
-      continue;
-    }
-    if (!Array.isArray(c)) continue;
-    for (const b of c) {
-      if (typeof b === "string" && PATH_MENTION_RE.test(b)) return true;
-      if (b?.type === "text" && typeof b.text === "string" && PATH_MENTION_RE.test(b.text)) return true;
-    }
-  }
-  return false;
+  if (anyStringMatches(body.system, PATH_MENTION_RE)) return true;
+  return anyStringMatches(body.messages, PATH_MENTION_RE);
 }
 
 /**

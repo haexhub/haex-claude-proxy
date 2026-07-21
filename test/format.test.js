@@ -436,3 +436,44 @@ test("hasCallerPathMention: false for plain text and tolerates a missing message
   assert.equal(hasCallerPathMention({ messages: [{ role: "user", content: "was ist das?" }] }), false);
   assert.equal(hasCallerPathMention({}), false);
 });
+
+test("hasCallerPathMention: detects a @path in body.system (string)", () => {
+  // anthropicMessagesToImagePrompt extracts body.system separately and passes
+  // it to --append-system-prompt; without the <turn> wrapper the CLI would
+  // resolve @path there too.
+  assert.equal(hasCallerPathMention({ system: "context: @/etc/passwd", messages: [] }), true);
+});
+
+test("hasCallerPathMention: detects a @path in body.system as a text-block array", () => {
+  assert.equal(
+    hasCallerPathMention({
+      system: [{ type: "text", text: "read @/etc/passwd" }],
+      messages: [],
+    }),
+    true,
+  );
+});
+
+test("hasCallerPathMention: detects a @path nested inside a tool_result's content", () => {
+  // flattenContent recurses into tool_result.content and joins blocks with
+  // `\n`, so the second block's leading `@/…` ends up whitespace-preceded in
+  // the flat prompt and would be resolved by the CLI.
+  const body = {
+    messages: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "x",
+            content: [
+              { type: "text", text: "prior line" },
+              { type: "text", text: "@/etc/passwd" },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  assert.equal(hasCallerPathMention(body), true);
+});

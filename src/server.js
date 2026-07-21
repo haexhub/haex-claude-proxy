@@ -582,12 +582,13 @@ async function handleMessages(req, res) {
       return errorResponse(res, 400, "invalid_request_error", `invalid image block: ${e.message}`);
     }
   }
-  const effectiveBody = imageFiles.length > 0 ? substituteImagePaths(body, imageFiles) : body;
+  const hasImages = imageFiles.length > 0;
+  const effectiveBody = hasImages ? substituteImagePaths(body, imageFiles) : body;
 
   // Image requests must skip the <turn role="…"> wrapper — see
   // anthropicMessagesToImagePrompt's docstring for why.
   const { promptText, systemText } =
-    imageFiles.length > 0 ? anthropicMessagesToImagePrompt(effectiveBody) : anthropicMessagesToPrompt(effectiveBody);
+    hasImages ? anthropicMessagesToImagePrompt(effectiveBody) : anthropicMessagesToPrompt(effectiveBody);
   // Always use non-streaming internally: --output-format stream-json requires
   // --verbose which creates ~35K cache tokens per call (charged as "extra
   // usage" on subscription). Non-streaming reads from the warm cache instead.
@@ -636,7 +637,16 @@ function materializeImageBlocks(body) {
     for (const m of body.messages) {
       if (!Array.isArray(m.content)) continue;
       for (const block of m.content) {
-        if (block?.type !== "image" || block.source?.type !== "base64") continue;
+        if (block?.type !== "image") continue;
+        // Only base64 image sources are materialized. URL sources would
+        // otherwise silently fall back to flattenContent → JSON.stringify (the
+        // pre-fix vision failure mode — model never sees an actual image), so
+        // reject them explicitly rather than pretend they're supported.
+        if (block.source?.type !== "base64") {
+          throw new Error(
+            `image block source.type must be 'base64' (got '${block.source?.type ?? "missing"}')`,
+          );
+        }
         if (typeof block.source.data !== "string" || block.source.data.length === 0) {
           throw new Error("image block source.data must be a non-empty base64 string");
         }

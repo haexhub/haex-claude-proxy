@@ -169,6 +169,35 @@ test("handleMessages: malformed image block returns 400, does not crash the serv
   assert.equal(goodRes.status, 200);
 });
 
+test("handleMessages: URL-source image returns 400 instead of silently falling back", async (t) => {
+  // hasImageBlocks matches any `type:"image"`, but materializeImageBlocks only
+  // handles base64 sources. Before the fix, a URL-source image would fall
+  // through with imageFiles=[] and route to anthropicMessagesToPrompt →
+  // JSON.stringify(block) — exactly the pre-fix "model never sees an image"
+  // failure mode. Must now come back as a client-facing 400 instead.
+  const { port } = await startServer(t);
+
+  const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 64,
+      stream: false,
+      messages: [{
+        role: "user",
+        content: [
+          { type: "image", source: { type: "url", url: "https://example.com/x.png" } },
+          { type: "text", text: "was ist das?" },
+        ],
+      }],
+    }),
+  });
+  assert.equal(res.status, 400);
+  const body = await res.json();
+  assert.match(body.error?.message ?? "", /base64/);
+});
+
 test("handleMessages: image request with an @path mention in caller text returns 400", async (t) => {
   // Image requests skip the <turn> wrapper, so an @path in caller text would
   // be resolved by the CLI as a real local file read (arbitrary disclosure).
