@@ -59,12 +59,15 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
   validateMessagesBody,
   anthropicMessagesToPrompt,
+  anthropicMessagesToImagePrompt,
+  hasImageBlocks,
   buildClaudeArgs,
   claudeJsonToAnthropic,
   extractOutputToolSchema,
@@ -548,13 +551,35 @@ async function handleMessages(req, res) {
     return forwardAnthropicMessages(req, res, body, ctx);
   }
 
-  const { promptText, systemText } = anthropicMessagesToPrompt(body);
+  // Image requests can't use flattenContent as-is (it would JSON.stringify the
+  // block into the prompt, so the model never sees an actual image). Write
+  // each image to a temp file and swap it for an `@path` text mention, which
+  // the CLI resolves as a real vision attachment — same cheap non-streaming
+  // path as text-only requests, no separate code path needed.
+  let imageFiles = [];
+  if (hasImageBlocks(body)) {
+    try {
+      imageFiles = materializeImageBlocks(body);
+    } catch (e) {
+      // Malformed image block (bad/missing base64 data) — a client error, not
+      // a reason to crash the whole process. materializeImageBlocks runs
+      // synchronously before any await in this handler, so an uncaught throw
+      // here would otherwise take down every in-flight request.
+      return errorResponse(res, 400, "invalid_request_error", `invalid image block: ${e.message}`);
+    }
+  }
+  const effectiveBody = imageFiles.length > 0 ? substituteImagePaths(body, imageFiles) : body;
+
+  // Image requests must skip the <turn role="…"> wrapper — see
+  // anthropicMessagesToImagePrompt's docstring for why.
+  const { promptText, systemText } =
+    imageFiles.length > 0 ? anthropicMessagesToImagePrompt(effectiveBody) : anthropicMessagesToPrompt(effectiveBody);
   // Always use non-streaming internally: --output-format stream-json requires
   // --verbose which creates ~35K cache tokens per call (charged as "extra
   // usage" on subscription). Non-streaming reads from the warm cache instead.
   const jsonSchema = extractOutputToolSchema(body);
   const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: systemText, streaming: false, jsonSchema });
-  console.log("[proxy] prompt_len=%d stream_requested=%s home=%s", promptText.length, body.stream, ctx.home);
+  console.log("[proxy] prompt_len=%d stream_requested=%s images=%d home=%s", promptText.length, body.stream, imageFiles.length, ctx.home);
 
   // Serialize claude invocations sharing this credential HOME — see
   // home-lock.js for why (the CLI's own token-refresh-and-save has no
@@ -566,6 +591,7 @@ async function handleMessages(req, res) {
     env: envForHome(ctx.home),
   });
   proc.on("close", () => {
+    for (const f of imageFiles) fsp.unlink(f).catch(() => {});
     postSpawnCleanup(ctx)
       .catch((e) => console.error("[proxy] postSpawnCleanup failed:", e.message))
       .finally(releaseHomeLock);
@@ -575,6 +601,61 @@ async function handleMessages(req, res) {
     return bufferedThenSSE(proc, res, body.model);
   }
   return bufferedResponse(proc, res, body.model);
+}
+
+const IMAGE_MEDIA_TYPE_EXT = {
+  "image/png": "png",
+  "image/jpeg": "jpg",
+  "image/webp": "webp",
+  "image/gif": "gif",
+};
+
+/**
+ * Write every base64 `image` content block in the request to its own temp
+ * file. Returns the list of file paths (in message/block order) for
+ * substituteImagePaths to consume and for the caller to delete once the
+ * subprocess exits.
+ */
+function materializeImageBlocks(body) {
+  const paths = [];
+  for (const m of body.messages) {
+    if (!Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      if (block?.type !== "image" || block.source?.type !== "base64") continue;
+      if (typeof block.source.data !== "string" || block.source.data.length === 0) {
+        throw new Error("image block source.data must be a non-empty base64 string");
+      }
+      const ext = IMAGE_MEDIA_TYPE_EXT[block.source.media_type] ?? "bin";
+      const filePath = path.join(os.tmpdir(), `hcp-image-${randomBytes(8).toString("hex")}.${ext}`);
+      fs.writeFileSync(filePath, Buffer.from(block.source.data, "base64"));
+      paths.push(filePath);
+    }
+  }
+  return paths;
+}
+
+/**
+ * Replace each `image` block with a text block referencing its materialized
+ * temp file via an `@path` mention, in the same order materializeImageBlocks
+ * produced `imageFiles` — the CLI reads the file and attaches it as a real
+ * vision input.
+ */
+function substituteImagePaths(body, imageFiles) {
+  let i = 0;
+  return {
+    ...body,
+    messages: body.messages.map((m) => {
+      if (!Array.isArray(m.content)) return m;
+      return {
+        ...m,
+        content: m.content.map((block) =>
+          block?.type === "image" && block.source?.type === "base64"
+            ? { type: "text", text: `@${imageFiles[i++]}` }
+            : block,
+        ),
+      };
+    }),
+  };
 }
 
 // ────────────────────────────────────────────────────────────────────────────

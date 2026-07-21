@@ -7,6 +7,8 @@ import { dirname, join } from "node:path";
 import {
   validateMessagesBody,
   anthropicMessagesToPrompt,
+  anthropicMessagesToImagePrompt,
+  hasImageBlocks,
   flattenContent,
   buildClaudeArgs,
   claudeJsonToAnthropic,
@@ -354,4 +356,50 @@ test("real fixture: text_delta concatenation reconstructs assistant text", () =>
     }
   }
   assert.equal(assembled, "1, 2, 3");
+});
+
+// ───── hasImageBlocks ─────
+
+const imageBlock = { type: "image", source: { type: "base64", media_type: "image/png", data: "AAAA" } };
+
+test("hasImageBlocks: true when a message carries an image block", () => {
+  const body = { messages: [{ role: "user", content: [imageBlock, { type: "text", text: "was ist das?" }] }] };
+  assert.equal(hasImageBlocks(body), true);
+});
+
+test("hasImageBlocks: false for text-only string content", () => {
+  assert.equal(hasImageBlocks({ messages: [{ role: "user", content: "hallo" }] }), false);
+});
+
+test("hasImageBlocks: false for text-only block array", () => {
+  assert.equal(hasImageBlocks({ messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }] }), false);
+});
+
+test("hasImageBlocks: tolerates a missing messages array", () => {
+  assert.equal(hasImageBlocks({}), false);
+});
+
+// ───── anthropicMessagesToImagePrompt ─────
+
+test("anthropicMessagesToImagePrompt: omits the <turn role=…> wrapper", () => {
+  const { promptText } = anthropicMessagesToImagePrompt({
+    messages: [{ role: "user", content: "@/tmp/x.png\nwas zeigt das?" }],
+  });
+  assert.equal(promptText, "@/tmp/x.png\nwas zeigt das?");
+  assert.doesNotMatch(promptText, /<turn/);
+});
+
+test("anthropicMessagesToImagePrompt: joins multiple messages with a blank line", () => {
+  const { promptText } = anthropicMessagesToImagePrompt({
+    messages: [
+      { role: "user", content: "erstes" },
+      { role: "assistant", content: "zweites" },
+    ],
+  });
+  assert.equal(promptText, "erstes\n\nzweites");
+});
+
+test("anthropicMessagesToImagePrompt: extracts system text same as anthropicMessagesToPrompt", () => {
+  const body = { system: "sei knapp", messages: [{ role: "user", content: "hi" }] };
+  assert.equal(anthropicMessagesToImagePrompt(body).systemText, anthropicMessagesToPrompt(body).systemText);
 });
