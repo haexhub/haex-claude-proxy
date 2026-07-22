@@ -609,17 +609,6 @@ async function handleMessages(req, res) {
   const bridgeableTools = toolCallback ? extractFunctionTools(body) : [];
   let mcpConfigPath = null;
   let allowedToolNames = null;
-  if (toolCallback && bridgeableTools.length) {
-    const bridge = buildMcpBridgeConfig({
-      tools: bridgeableTools,
-      callbackUrl: toolCallback.url,
-      callbackToken: toolCallback.token,
-      timeoutMs: TOOL_CALLBACK_TIMEOUT_MS,
-      bridgeScriptPath: BRIDGE_SCRIPT_PATH,
-    });
-    mcpConfigPath = await writeMcpConfigFile(bridge.config);
-    allowedToolNames = bridge.allowedToolNames;
-  }
 
   // Image requests can't use flattenContent as-is (it would JSON.stringify the
   // block into the prompt, so the model never sees an actual image). Write
@@ -658,6 +647,23 @@ async function handleMessages(req, res) {
   // anthropicMessagesToImagePrompt's docstring for why.
   const { promptText, systemText } =
     hasImages ? anthropicMessagesToImagePrompt(effectiveBody) : anthropicMessagesToPrompt(effectiveBody);
+
+  // Write the MCP bridge config only here, past every early-return validation
+  // above: the temp file holds the callback token and is unlinked in
+  // proc.on("close") below, so writing it before a path that returns without
+  // spawning would leak a 0600 secret file into tmp on each such request.
+  if (toolCallback && bridgeableTools.length) {
+    const bridge = buildMcpBridgeConfig({
+      tools: bridgeableTools,
+      callbackUrl: toolCallback.url,
+      callbackToken: toolCallback.token,
+      timeoutMs: TOOL_CALLBACK_TIMEOUT_MS,
+      bridgeScriptPath: BRIDGE_SCRIPT_PATH,
+    });
+    mcpConfigPath = await writeMcpConfigFile(bridge.config);
+    allowedToolNames = bridge.allowedToolNames;
+  }
+
   // Always use non-streaming internally: --output-format stream-json requires
   // --verbose which creates ~35K cache tokens per call (charged as "extra
   // usage" on subscription). Non-streaming reads from the warm cache instead.
