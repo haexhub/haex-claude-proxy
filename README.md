@@ -43,7 +43,7 @@ one via `PROXY_RESOLVER`:
 | _NPM module name_ | Anything else — install a resolver plugin and point `PROXY_RESOLVER` at its package name | depends on the plugin |
 
 Builtins ship with the proxy core. External resolvers are loaded via dynamic
-`import()` — install with npm and the dispatcher picks them up.
+`import()` — install with pnpm and the dispatcher picks them up.
 
 ### Available external resolvers
 
@@ -52,11 +52,11 @@ Builtins ship with the proxy core. External resolvers are loaded via dynamic
 To use:
 
 ```bash
-npm install file:../haex-claude-proxy-resolver-pg
+pnpm add file:../haex-claude-proxy-resolver-pg
 PROXY_RESOLVER=haex-claude-proxy-resolver-pg
 DATABASE_URL=postgres://...
 SPECIFYR_SECRET_KEY=<64-hex master key>
-npm start
+pnpm start
 ```
 
 ## Endpoints
@@ -90,7 +90,7 @@ Generate a token with `openssl rand -hex 32`.
 ## Run locally
 
 ```bash
-PROXY_RESOLVER=file PROXY_CREDENTIALS_HOME=$HOME npm start
+PROXY_RESOLVER=file PROXY_CREDENTIALS_HOME=$HOME pnpm start
 ```
 
 That points the resolver at your interactive `claude login` credentials. Runs
@@ -113,8 +113,8 @@ on `:8080` (override with `PORT`).
 ## Run tests
 
 ```bash
-npm test                              # unit tests (no network)
-CLAUDE_PROXY_E2E=1 npm test           # also runs gated integration tests
+pnpm test                             # unit tests (no network)
+CLAUDE_PROXY_E2E=1 pnpm test          # also runs gated integration tests
                                       # against the real claude CLI
 ```
 
