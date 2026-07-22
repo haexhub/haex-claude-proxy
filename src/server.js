@@ -70,8 +70,11 @@ import {
   hasImageBlocks,
   hasCallerPathMention,
   buildClaudeArgs,
+  buildMcpBridgeConfig,
   claudeJsonToAnthropic,
+  extractFunctionTools,
   extractOutputToolSchema,
+  extractToolCallback,
   mapClaudeStreamEvent,
   openAIBodyToAnthropic,
   anthropicToOpenAIResponse,
@@ -396,6 +399,49 @@ const ALLOWED_FORWARD_HOSTS = (() => {
 // case a deploy needs a longer budget.
 const UPSTREAM_TIMEOUT_MS = Number(process.env.PROXY_UPSTREAM_TIMEOUT_MS ?? 120_000);
 
+// ────────────────────────────────────────────────────────────────────────────
+// MCP tool bridge (see src/mcp-bridge/bridge-server.js + cli-format.js's
+// buildMcpBridgeConfig/extractToolCallback). Lets a caller's own function
+// tools (not just the structured-output tool) be called mid-task by the
+// spawned `claude` CLI and get a real result back, via an authenticated
+// HTTP callback into the caller.
+// ────────────────────────────────────────────────────────────────────────────
+
+const BRIDGE_SCRIPT_PATH = path.join(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "mcp-bridge",
+  "bridge-server.js",
+);
+
+// No sane universal default here (unlike ALLOWED_FORWARD_HOSTS's
+// api.anthropic.com) — a tool callback target is deployment-specific (e.g.
+// an intra-docker-network service name). Empty by default: the bridge is
+// inert until a deploy opts in via PROXY_ALLOWED_CALLBACK_HOSTS.
+const ALLOWED_CALLBACK_HOSTS = (() => {
+  const raw = (process.env.PROXY_ALLOWED_CALLBACK_HOSTS ?? "").trim();
+  const set = new Set();
+  if (!raw) return set;
+  for (const h of raw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)) {
+    set.add(h);
+  }
+  return set;
+})();
+
+const TOOL_CALLBACK_TIMEOUT_MS = Number(process.env.PROXY_TOOL_CALLBACK_TIMEOUT_MS ?? 60_000);
+
+/**
+ * Write a per-request MCP config to a private 0600 temp file (not an inline
+ * `--mcp-config` JSON string) — keeps the callback URL/token out of
+ * `ps auxww`, and sidesteps needing to verify inline-JSON support in the
+ * pinned CLI build. Caller is responsible for unlinking it once the spawned
+ * process exits (every exit path — see handleMessages's `proc.on("close")`).
+ */
+async function writeMcpConfigFile(config) {
+  const filePath = path.join(os.tmpdir(), `hcp-mcp-${randomBytes(8).toString("hex")}.json`);
+  await fsp.writeFile(filePath, JSON.stringify(config), { mode: 0o600 });
+  return filePath;
+}
+
 function resolveForwardTarget(rawBase) {
   let parsed;
   try {
@@ -552,6 +598,29 @@ async function handleMessages(req, res) {
     return forwardAnthropicMessages(req, res, body, ctx);
   }
 
+  // MCP tool bridge: a caller that wants its own function tools (not just
+  // the structured-output tool) callable mid-task sends the callback
+  // headers below. Absent headers -> today's exact behavior (function tools
+  // dropped, --allowed-tools "").
+  const toolCallback = extractToolCallback(req.headers, ALLOWED_CALLBACK_HOSTS);
+  if (toolCallback?.error) {
+    return errorResponse(res, 400, "invalid_request_error", toolCallback.error);
+  }
+  const bridgeableTools = toolCallback ? extractFunctionTools(body) : [];
+  let mcpConfigPath = null;
+  let allowedToolNames = null;
+  if (toolCallback && bridgeableTools.length) {
+    const bridge = buildMcpBridgeConfig({
+      tools: bridgeableTools,
+      callbackUrl: toolCallback.url,
+      callbackToken: toolCallback.token,
+      timeoutMs: TOOL_CALLBACK_TIMEOUT_MS,
+      bridgeScriptPath: BRIDGE_SCRIPT_PATH,
+    });
+    mcpConfigPath = await writeMcpConfigFile(bridge.config);
+    allowedToolNames = bridge.allowedToolNames;
+  }
+
   // Image requests can't use flattenContent as-is (it would JSON.stringify the
   // block into the prompt, so the model never sees an actual image). Write
   // each image to a temp file and swap it for an `@path` text mention, which
@@ -593,8 +662,15 @@ async function handleMessages(req, res) {
   // --verbose which creates ~35K cache tokens per call (charged as "extra
   // usage" on subscription). Non-streaming reads from the warm cache instead.
   const jsonSchema = extractOutputToolSchema(body);
-  const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: systemText, streaming: false, jsonSchema });
-  console.log("[proxy] prompt_len=%d stream_requested=%s images=%d home=%s", promptText.length, body.stream, imageFiles.length, ctx.home);
+  const cliArgs = buildClaudeArgs({
+    model: body.model,
+    systemPrompt: systemText,
+    streaming: false,
+    jsonSchema,
+    mcpConfigPath,
+    allowedToolNames,
+  });
+  console.log("[proxy] prompt_len=%d stream_requested=%s images=%d bridged_tools=%d home=%s", promptText.length, body.stream, imageFiles.length, bridgeableTools.length, ctx.home);
 
   // Serialize claude invocations sharing this credential HOME — see
   // home-lock.js for why (the CLI's own token-refresh-and-save has no
@@ -607,6 +683,7 @@ async function handleMessages(req, res) {
   });
   proc.on("close", () => {
     for (const f of imageFiles) fsp.unlink(f).catch(() => {});
+    if (mcpConfigPath) fsp.unlink(mcpConfigPath).catch(() => {});
     postSpawnCleanup(ctx)
       .catch((e) => console.error("[proxy] postSpawnCleanup failed:", e.message))
       .finally(releaseHomeLock);
