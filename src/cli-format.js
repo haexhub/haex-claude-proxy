@@ -197,31 +197,153 @@ export function extractOutputToolSchema(body) {
 }
 
 /**
+ * Name the `claude` CLI spawns its bridged MCP server under (see
+ * `buildMcpBridgeConfig`) — every bridged tool is therefore exposed to the
+ * CLI as `mcp__fwbg-bridge__<name>`.
+ */
+export const MCP_BRIDGE_SERVER_NAME = "fwbg-bridge";
+
+/**
+ * Every request tool EXCEPT the structured-output tool (`final_result`,
+ * see `extractOutputToolSchema`) — these are the caller's real function
+ * tools (e.g. a search tool the model calls mid-reasoning and gets a result
+ * back), the ones the MCP bridge exists to wire through.
+ */
+export function extractFunctionTools(body) {
+  return (body?.tools ?? []).filter((t) => t?.name !== OUTPUT_TOOL_NAME);
+}
+
+/**
+ * Build the `--mcp-config` JSON object (an stdio MCP server the `claude`
+ * CLI spawns itself, see `src/mcp-bridge/bridge-server.js`) plus the
+ * derived `--allowed-tools` allow-list for a request's bridgeable function
+ * tools.
+ *
+ * Anthropic's `input_schema` and MCP's `inputSchema` are both plain JSON
+ * Schema — direct pass-through, no translation needed. The bridge script
+ * itself never sees the callback URL/token on argv (only via env on the
+ * child process it's spawned as), so a `ps auxww` on the host never
+ * reveals them.
+ *
+ * @param {{tools: object[], callbackUrl: string, callbackToken: string, timeoutMs: number, bridgeScriptPath: string}} opts
+ * @returns {{config: object, allowedToolNames: string[]}}
+ */
+export function buildMcpBridgeConfig({ tools, callbackUrl, callbackToken, timeoutMs, bridgeScriptPath }) {
+  const mcpTools = tools.map((t) => ({
+    name: t.name,
+    description: t.description ?? "",
+    inputSchema: t.input_schema ?? {},
+  }));
+  const allowedToolNames = tools.map((t) => `mcp__${MCP_BRIDGE_SERVER_NAME}__${t.name}`);
+  return {
+    config: {
+      mcpServers: {
+        [MCP_BRIDGE_SERVER_NAME]: {
+          command: "node",
+          args: [bridgeScriptPath],
+          env: {
+            MCP_BRIDGE_TOOLS: JSON.stringify(mcpTools),
+            MCP_BRIDGE_CALLBACK_URL: callbackUrl,
+            MCP_BRIDGE_CALLBACK_TOKEN: callbackToken,
+            MCP_BRIDGE_TOOL_TIMEOUT_MS: String(timeoutMs),
+          },
+        },
+      },
+    },
+    allowedToolNames,
+  };
+}
+
+/**
+ * Read the `x-tool-callback-url` / `x-tool-callback-token` headers a caller
+ * sends when it wants its own function tools bridged through this request
+ * (see `buildMcpBridgeConfig`). Returns `null` when neither header is
+ * present (caller didn't ask for tool bridging — today's exact behavior).
+ * Returns `{error}` when a callback was requested but the URL's host isn't
+ * in `allowedHosts` — mirrors `resolveForwardTarget`'s allowlist pattern,
+ * except plain `http://` is accepted (the callback target is normally an
+ * intra-docker-network service, not the public internet).
+ *
+ * @param {Record<string, string|string[]|undefined>} headers
+ * @param {Set<string>} allowedHosts
+ * @returns {{url: string, token: string}|{error: string}|null}
+ */
+export function extractToolCallback(headers, allowedHosts) {
+  const rawUrl = headers?.["x-tool-callback-url"];
+  const rawToken = headers?.["x-tool-callback-token"];
+  if (!rawUrl && !rawToken) return null;
+  const url = Array.isArray(rawUrl) ? rawUrl[0] : rawUrl;
+  const token = Array.isArray(rawToken) ? rawToken[0] : rawToken;
+  if (!url || !token) {
+    return { error: "both x-tool-callback-url and x-tool-callback-token are required together" };
+  }
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return { error: `invalid x-tool-callback-url: ${url}` };
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    return { error: `x-tool-callback-url must be http(s), got ${parsed.protocol}` };
+  }
+  const host = parsed.hostname.toLowerCase();
+  if (!allowedHosts.has(host)) {
+    return {
+      error: `host '${host}' is not in PROXY_ALLOWED_CALLBACK_HOSTS - refusing to bridge tools`,
+    };
+  }
+  return { url, token };
+}
+
+/**
  * Build the argv (excluding the trailing `--print PROMPT`) for spawning the
  * `claude` subprocess.
  *
  * Function tools (the agent's own, e.g. a search tool the model can call
  * mid-reasoning and get a result back) are intentionally disabled via
  * `--allowed-tools ""` — that needs a real multi-turn tool_use ⇄ tool_result
- * loop this single-shot `--print` wrapper doesn't implement. The model
- * surfaces such tool intents as plain content blocks but nothing executes
- * them.
+ * loop this single-shot `--print` wrapper doesn't implement by default. The
+ * model surfaces such tool intents as plain content blocks but nothing
+ * executes them.
+ *
+ * When the caller passes `mcpConfigPath` + a non-empty `allowedToolNames`
+ * (see `buildMcpBridgeConfig` / `extractToolCallback`), that changes: the
+ * CLI is handed a real stdio MCP server via `--mcp-config` and pre-approved
+ * to call it via `--allowed-tools` — its own internal agent loop can then
+ * call those tools mid-task and get a real result back, all within this one
+ * `--print` invocation. `--strict-mcp-config` limits it to exactly this
+ * ephemeral server (no other MCP config on the host leaks in).
+ *
+ * NOTE (open risk, see plan "Open risks" #3): the exact `--allowed-tools`
+ * syntax for multiple `mcp__fwbg-bridge__*` entries (comma-separated single
+ * arg vs. repeated flag) is asserted here as comma-separated based on
+ * documented CLI usage; it is NOT yet verified against a real spawn — that
+ * verification is the Stage 2 E2E test in test/integration.test.js.
  *
  * The *output* tool (structured final-result schema, e.g. pydantic-ai's
  * `output_type=`) is different: it doesn't need a round trip, so it's wired
  * through natively via `--json-schema` when the caller passes `jsonSchema`
  * (see `extractOutputToolSchema`).
  *
- * @param {{model: string, systemPrompt: string|null, streaming: boolean, jsonSchema?: object|null}} opts
+ * @param {{model: string, systemPrompt: string|null, streaming: boolean, jsonSchema?: object|null, mcpConfigPath?: string|null, allowedToolNames?: string[]|null}} opts
  * @returns {string[]}
  */
-export function buildClaudeArgs({ model, systemPrompt, streaming, jsonSchema = null }) {
-  const args = [
-    "--no-session-persistence",
-    "--allowed-tools", "",
-    "--model", model,
-    "--output-format", streaming ? "stream-json" : "json",
-  ];
+export function buildClaudeArgs({
+  model,
+  systemPrompt,
+  streaming,
+  jsonSchema = null,
+  mcpConfigPath = null,
+  allowedToolNames = null,
+}) {
+  const args = ["--no-session-persistence"];
+  if (mcpConfigPath && allowedToolNames?.length) {
+    args.push("--mcp-config", mcpConfigPath, "--strict-mcp-config");
+    args.push("--allowed-tools", allowedToolNames.join(","));
+  } else {
+    args.push("--allowed-tools", "");
+  }
+  args.push("--model", model, "--output-format", streaming ? "stream-json" : "json");
   if (streaming) {
     args.push("--include-partial-messages");
     args.push("--verbose");
