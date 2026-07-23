@@ -27,6 +27,25 @@ RUN apt-get update \
       python3 make g++ \
  && rm -rf /var/lib/apt/lists/*
 
+# pnpm (Node 25+ no longer bundles corepack). Fetch the self-contained pnpm
+# distribution — no npm, no shell-profile setup — pinned to match
+# package.json's "packageManager" field. The archive holds a bundled-Node
+# `pnpm` executable that loads its sibling `dist/`, so extract it whole into a
+# dir on PATH. PNPM_HOME is pnpm's global bin dir (where `pnpm add -g` links
+# the `claude` binary); it must be on PATH too.
+ENV PNPM_HOME=/usr/local/share/pnpm
+ENV PATH="/opt/pnpm:$PNPM_HOME/bin:$PATH"
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+      amd64) PNPM_ARCH=x64 ;; \
+      arm64) PNPM_ARCH=arm64 ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+ && mkdir -p /opt/pnpm \
+ && curl -fsSL "https://github.com/pnpm/pnpm/releases/download/v11.11.0/pnpm-linux-${PNPM_ARCH}.tar.gz" \
+    | tar -xz -C /opt/pnpm \
+ && pnpm --version
+
 # `claude` CLI lives globally so the spawned subprocess can be invoked
 # by name. Pin to a specific minor version — 2.1.126 broke --print
 # --output-format json (exits 0 with no output); that regression is
@@ -37,16 +56,19 @@ RUN apt-get update \
 # never reaching the "paste code" prompt, both interactively and via PTY
 # automation; 2.1.191 reaches the prompt immediately. Bump only after
 # verifying both: the --print/json regression and a real OAuth login.
-RUN npm install -g @anthropic-ai/claude-code@2.1.191
+# --allow-build: claude-code's postinstall fetches its platform-native
+# binary; pnpm blocks dependency build scripts by default (global installs
+# don't read the project's pnpm-workspace.yaml, so allow it per-command).
+RUN pnpm add -g --allow-build=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.191
 
 WORKDIR /app
-COPY package.json package-lock.json* ./
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # Production install: ships the optional node-pty if its native build
-# succeeds (always does on bookworm with the build deps above). If a
-# future deploy doesn't need the web-setup flow, dropping node-pty
-# would only require removing PROXY_SETUP_TOKEN at runtime — the
-# resolver paths don't import it.
-RUN npm install --omit=dev --no-audit --no-fund
+# succeeds (always does on bookworm with the build deps above; its build
+# script is allow-listed in pnpm-workspace.yaml). If a future deploy
+# doesn't need the web-setup flow, dropping node-pty would only require
+# removing PROXY_SETUP_TOKEN at runtime — the resolver paths don't import it.
+RUN pnpm install --prod --frozen-lockfile
 COPY src/ ./src/
 
 ENV NODE_ENV=production \
