@@ -1042,6 +1042,8 @@ function errorResponse(res, status, type, message) {
 //   POST /setup/code    → submit the code copied off Anthropic's page,
 //                          resolves once credentials.json is on disk
 //   POST /setup/reset   → kill any in-flight flow, return to IDLE
+//   POST /setup/logout  → reset() AND delete credentials.json — disconnects
+//                          the linked Claude account
 // ────────────────────────────────────────────────────────────────────────────
 
 async function handleSetup(req, res, pathname) {
@@ -1132,6 +1134,17 @@ async function handleSetup(req, res, pathname) {
     setupController.reset();
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true }));
+    return;
+  }
+
+  if (req.method === "POST" && sub === "logout") {
+    try {
+      const result = await setupController.logout();
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true, ...result }));
+    } catch (e) {
+      return errorResponse(res, 500, "setup_error", e.message);
+    }
     return;
   }
 

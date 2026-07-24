@@ -259,6 +259,41 @@ test("controller: start() while AWAITING_CODE returns the captured URL string", 
   assert.equal(u2, url);
 });
 
+// ── logout ────────────────────────────────────────────────────────────────
+
+test("controller: logout() deletes credentials.json and resets to IDLE", async () => {
+  const home = await mkHomeDir();
+  const credPath = path.join(home, ".claude", ".credentials.json");
+  await fs.mkdir(path.dirname(credPath), { recursive: true });
+  await fs.writeFile(credPath, JSON.stringify({ claudeAiOauth: { access_token: "ok" } }));
+
+  const ctrl = createSetupController({ spawnPty: () => makeFakePty(), credentialsHome: home });
+  const result = await ctrl.logout();
+
+  assert.equal(result.deleted, true);
+  assert.equal(await ctrl.credentialsExist(), false);
+  assert.equal(ctrl.snapshot().state, States.IDLE);
+});
+
+test("controller: logout() is idempotent when no credentials exist", async () => {
+  const home = await mkHomeDir();
+  const ctrl = createSetupController({ spawnPty: () => makeFakePty(), credentialsHome: home });
+  const result = await ctrl.logout();
+  assert.equal(result.deleted, false);
+});
+
+test("controller: logout() kills an in-flight subprocess like reset()", async () => {
+  const home = await mkHomeDir();
+  const fake = makeFakePty();
+  const ctrl = createSetupController({ spawnPty: () => fake, credentialsHome: home });
+  const urlPromise = ctrl.start();
+  const logoutPromise = ctrl.logout();
+  await assert.rejects(urlPromise, /reset/);
+  await logoutPromise;
+  assert.equal(ctrl.snapshot().state, States.IDLE);
+  assert.equal(fake.isKilled(), true);
+});
+
 // ── credentialsExist ──────────────────────────────────────────────────────
 
 test("controller: credentialsExist returns true only when file present", async () => {

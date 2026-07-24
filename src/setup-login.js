@@ -112,6 +112,29 @@ export function createSetupController({
     }
   }
 
+  function doReset() {
+    clearTimers();
+    if (proc) {
+      try { proc.kill(); } catch { /* best-effort */ }
+      proc = null;
+    }
+    if (urlReject) {
+      urlReject(new Error("reset() called"));
+    }
+    if (finishReject) {
+      finishReject(new Error("reset() called"));
+    }
+    urlResolve = urlReject = null;
+    finishResolve = finishReject = null;
+    urlPromise = null;
+    finishPromise = null;
+    state = States.IDLE;
+    oauthUrl = null;
+    errorMessage = null;
+    stdoutBuf = "";
+    startedAt = null;
+  }
+
   function transitionToError(message) {
     errorMessage = message;
     state = States.ERROR;
@@ -338,26 +361,25 @@ export function createSetupController({
      * is stuck in error state) and on shutdown.
      */
     reset() {
-      clearTimers();
-      if (proc) {
-        try { proc.kill(); } catch { /* best-effort */ }
-        proc = null;
+      doReset();
+    },
+
+    /**
+     * Disconnect the linked Claude account: reset the state machine (as
+     * reset() does) AND delete the on-disk credentials.json so the next
+     * request finds no credentials. Idempotent — deleting an
+     * already-absent file is not an error.
+     */
+    async logout() {
+      doReset();
+      const credPath = path.join(credentialsHome, ".claude", ".credentials.json");
+      try {
+        await fsp.unlink(credPath);
+        return { deleted: true };
+      } catch (e) {
+        if (e.code === "ENOENT") return { deleted: false };
+        throw e;
       }
-      if (urlReject) {
-        urlReject(new Error("reset() called"));
-      }
-      if (finishReject) {
-        finishReject(new Error("reset() called"));
-      }
-      urlResolve = urlReject = null;
-      finishResolve = finishReject = null;
-      urlPromise = null;
-      finishPromise = null;
-      state = States.IDLE;
-      oauthUrl = null;
-      errorMessage = null;
-      stdoutBuf = "";
-      startedAt = null;
     },
   };
 }
