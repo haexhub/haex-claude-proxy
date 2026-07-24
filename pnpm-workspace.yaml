@@ -1,0 +1,5 @@
+# node-pty (optional dependency, powers the web-driven /setup OAuth flow) ships
+# a native addon built via a lifecycle script. pnpm blocks dependency build
+# scripts by default; allow just this one so the addon actually compiles.
+allowBuilds:
+  node-pty: true

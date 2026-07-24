@@ -12,9 +12,13 @@ import {
   hasCallerPathMention,
   flattenContent,
   buildClaudeArgs,
+  buildMcpBridgeConfig,
   claudeJsonToAnthropic,
+  extractFunctionTools,
   extractOutputToolSchema,
+  extractToolCallback,
   mapClaudeStreamEvent,
+  MCP_BRIDGE_SERVER_NAME,
 } from "../src/cli-format.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -211,6 +215,143 @@ test("buildClaudeArgs: passes --json-schema as a JSON string when given", () => 
   const idx = args.indexOf("--json-schema");
   assert.ok(idx >= 0);
   assert.deepEqual(JSON.parse(args[idx + 1]), schema);
+});
+
+test("buildClaudeArgs: without mcpConfigPath is byte-for-byte identical to today", () => {
+  const withoutBridge = buildClaudeArgs({ model: "x", systemPrompt: "sp", streaming: false });
+  const withNullBridge = buildClaudeArgs({
+    model: "x", systemPrompt: "sp", streaming: false, mcpConfigPath: null, allowedToolNames: null,
+  });
+  const withEmptyAllowList = buildClaudeArgs({
+    model: "x", systemPrompt: "sp", streaming: false, mcpConfigPath: "/tmp/x.json", allowedToolNames: [],
+  });
+  assert.deepEqual(withoutBridge, ["--no-session-persistence", "--allowed-tools", "", "--model", "x", "--output-format", "json", "--append-system-prompt", "sp"]);
+  assert.deepEqual(withNullBridge, withoutBridge);
+  assert.deepEqual(withEmptyAllowList, withoutBridge);
+});
+
+test("buildClaudeArgs: with mcpConfigPath + allowedToolNames emits --mcp-config/--strict-mcp-config/--allowed-tools", () => {
+  const args = buildClaudeArgs({
+    model: "x",
+    systemPrompt: null,
+    streaming: false,
+    mcpConfigPath: "/tmp/mcp-abc.json",
+    allowedToolNames: ["mcp__fwbg-bridge__search_web_tool", "mcp__fwbg-bridge__lookup_prior_art_tool"],
+  });
+  const mcpIdx = args.indexOf("--mcp-config");
+  assert.equal(args[mcpIdx + 1], "/tmp/mcp-abc.json");
+  assert.ok(args.includes("--strict-mcp-config"));
+  const toolsIdx = args.indexOf("--allowed-tools");
+  assert.equal(args[toolsIdx + 1], "mcp__fwbg-bridge__search_web_tool,mcp__fwbg-bridge__lookup_prior_art_tool");
+});
+
+// ───── extractFunctionTools ─────
+
+test("extractFunctionTools: drops final_result, keeps real function tools", () => {
+  const tools = extractFunctionTools({
+    tools: [
+      { name: "search_web_tool", description: "d", input_schema: { type: "object" } },
+      { name: "final_result", input_schema: { type: "object" } },
+    ],
+  });
+  assert.equal(tools.length, 1);
+  assert.equal(tools[0].name, "search_web_tool");
+});
+
+test("extractFunctionTools: empty array when tools missing", () => {
+  assert.deepEqual(extractFunctionTools({}), []);
+});
+
+// ───── buildMcpBridgeConfig ─────
+
+test("buildMcpBridgeConfig: maps input_schema to inputSchema 1:1 and builds allow-list", () => {
+  const tools = [
+    { name: "search_web_tool", description: "search", input_schema: { type: "object", properties: {} } },
+  ];
+  const { config, allowedToolNames } = buildMcpBridgeConfig({
+    tools,
+    callbackUrl: "http://fwbg-agents:8421/internal/tool-exec/42",
+    callbackToken: "secret-token",
+    timeoutMs: 30000,
+    bridgeScriptPath: "/app/src/mcp-bridge/bridge-server.js",
+  });
+  const server = config.mcpServers[MCP_BRIDGE_SERVER_NAME];
+  assert.equal(server.command, "node");
+  assert.deepEqual(server.args, ["/app/src/mcp-bridge/bridge-server.js"]);
+  const bridgedTools = JSON.parse(server.env.MCP_BRIDGE_TOOLS);
+  assert.deepEqual(bridgedTools, [
+    { name: "search_web_tool", description: "search", inputSchema: { type: "object", properties: {} } },
+  ]);
+  assert.equal(server.env.MCP_BRIDGE_CALLBACK_URL, "http://fwbg-agents:8421/internal/tool-exec/42");
+  assert.equal(server.env.MCP_BRIDGE_CALLBACK_TOKEN, "secret-token");
+  assert.equal(server.env.MCP_BRIDGE_TOOL_TIMEOUT_MS, "30000");
+  assert.deepEqual(allowedToolNames, [`mcp__${MCP_BRIDGE_SERVER_NAME}__search_web_tool`]);
+});
+
+test("buildMcpBridgeConfig: never puts the callback URL/token on argv (only env)", () => {
+  const { config } = buildMcpBridgeConfig({
+    tools: [{ name: "t", input_schema: {} }],
+    callbackUrl: "http://x/y",
+    callbackToken: "tok",
+    timeoutMs: 1000,
+    bridgeScriptPath: "/app/bridge.js",
+  });
+  const args = config.mcpServers[MCP_BRIDGE_SERVER_NAME].args;
+  assert.ok(!args.some((a) => a.includes("tok")));
+  assert.ok(!args.some((a) => a.includes("http://x/y")));
+});
+
+// ───── extractToolCallback ─────
+
+test("extractToolCallback: returns null when no callback headers present", () => {
+  assert.equal(extractToolCallback({}, new Set(["fwbg-agents"])), null);
+});
+
+test("extractToolCallback: returns url+token when both headers present and host allowed", () => {
+  const r = extractToolCallback(
+    { "x-tool-callback-url": "http://fwbg-agents:8421/internal/tool-exec/1", "x-tool-callback-token": "tok" },
+    new Set(["fwbg-agents"]),
+  );
+  assert.deepEqual(r, { url: "http://fwbg-agents:8421/internal/tool-exec/1", token: "tok" });
+});
+
+test("extractToolCallback: permits plain http:// for intra-docker-network hosts", () => {
+  const r = extractToolCallback(
+    { "x-tool-callback-url": "http://fwbg-agents:8421/x", "x-tool-callback-token": "tok" },
+    new Set(["fwbg-agents"]),
+  );
+  assert.equal(r.error, undefined);
+});
+
+test("extractToolCallback: rejects a host not in the allowlist", () => {
+  const r = extractToolCallback(
+    { "x-tool-callback-url": "http://evil.example/x", "x-tool-callback-token": "tok" },
+    new Set(["fwbg-agents"]),
+  );
+  assert.match(r.error, /not in PROXY_ALLOWED_CALLBACK_HOSTS/);
+});
+
+test("extractToolCallback: rejects when only one of url/token is present", () => {
+  const r1 = extractToolCallback({ "x-tool-callback-url": "http://fwbg-agents/x" }, new Set(["fwbg-agents"]));
+  assert.match(r1.error, /required together/);
+  const r2 = extractToolCallback({ "x-tool-callback-token": "tok" }, new Set(["fwbg-agents"]));
+  assert.match(r2.error, /required together/);
+});
+
+test("extractToolCallback: rejects malformed URL", () => {
+  const r = extractToolCallback(
+    { "x-tool-callback-url": "not-a-url", "x-tool-callback-token": "tok" },
+    new Set(["fwbg-agents"]),
+  );
+  assert.match(r.error, /invalid x-tool-callback-url/);
+});
+
+test("extractToolCallback: rejects non-http(s) protocol", () => {
+  const r = extractToolCallback(
+    { "x-tool-callback-url": "ftp://fwbg-agents/x", "x-tool-callback-token": "tok" },
+    new Set(["fwbg-agents"]),
+  );
+  assert.match(r.error, /must be http\(s\)/);
 });
 
 // ───── claudeJsonToAnthropic ─────
