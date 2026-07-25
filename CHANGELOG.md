@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.1](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.0...v0.6.1) (2026-07-25)
+
+
+### Bug Fixes
+
+* Healthcheck-Script statt kaputtem Inline-HealthCmd ([2856455](https://github.com/haexhub/haex-claude-proxy/commit/2856455d98f828a176a48db80ec1ca9e26e92580))
+* Healthcheck-Script statt kaputtem Inline-HealthCmd ([498b7cc](https://github.com/haexhub/haex-claude-proxy/commit/498b7ccc9dca0088747f2c31f56e7d5654b83bec))
+
 ## [0.6.0](https://github.com/haexhub/haex-claude-proxy/compare/v0.5.1...v0.6.0) (2026-07-24)
 
 
