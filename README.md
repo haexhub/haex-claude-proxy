@@ -62,6 +62,9 @@ pnpm start
 ## Endpoints
 
 - `POST /v1/messages` — Anthropic Messages API.
+- `/v1/messages/batches...` — explicit Anthropic Message Batches passthrough
+  for clients that call the Batches API path with `api_key` resolver
+  credentials. Normal `/v1/messages` requests never switch to batch mode.
 - `POST /v1/chat/completions` — OpenAI-compatible alias (also accepts
   `/chat/completions` without the `/v1` prefix).
 - `GET /v1/models` — static list (Claude Code probes this on startup).
