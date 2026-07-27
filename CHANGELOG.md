@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.6.1](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.0...v0.6.1) (2026-07-25)
+
+
+### Bug Fixes
+
+* Healthcheck-Script statt kaputtem Inline-HealthCmd ([2856455](https://github.com/haexhub/haex-claude-proxy/commit/2856455d98f828a176a48db80ec1ca9e26e92580))
+* Healthcheck-Script statt kaputtem Inline-HealthCmd ([498b7cc](https://github.com/haexhub/haex-claude-proxy/commit/498b7ccc9dca0088747f2c31f56e7d5654b83bec))
+
+## [0.6.0](https://github.com/haexhub/haex-claude-proxy/compare/v0.5.1...v0.6.0) (2026-07-24)
+
+
+### Features
+
+* bridge real MCP tool calls through the claude CLI ([d7c46e5](https://github.com/haexhub/haex-claude-proxy/commit/d7c46e5e5be83077ea423c252b0c27b3a93386c7))
+
+
+### Bug Fixes
+
+* aktualisiere DEFAULT_AVAILABLE_MODELS auf aktuelle Claude-Modelle ([9c57f5d](https://github.com/haexhub/haex-claude-proxy/commit/9c57f5df270017098bedec73b9813816bd9965ad))
+* aktualisiere DEFAULT_AVAILABLE_MODELS auf aktuelle Claude-Modelle ([2bdf837](https://github.com/haexhub/haex-claude-proxy/commit/2bdf83784db5bbd29972c46273c5f3990eace945))
+* defer MCP bridge config write past image validation ([3c50a0e](https://github.com/haexhub/haex-claude-proxy/commit/3c50a0e7e85a5049e2db514032fb945461d05446))
+
 ## [0.5.1](https://github.com/haexhub/haex-claude-proxy/compare/v0.5.0...v0.5.1) (2026-07-21)
 
 
