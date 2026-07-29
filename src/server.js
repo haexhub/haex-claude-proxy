@@ -32,7 +32,10 @@
  *                       `--model X` fails with a misleading "may not exist"
  *                       error. List is hardcoded (or PROXY_AVAILABLE_MODELS
  *                       env override) — the public endpoint requires an API
- *                       key and isn't reachable from OAuth credentials.
+ *                       key and isn't reachable from OAuth credentials. The
+ *                       same list also gates POST /v1/messages and
+ *                       /v1/chat/completions: an unknown `model` is rejected
+ *                       immediately instead of reaching the claude subprocess.
  *   GET  /v1/models/{id} Single-model lookup against the same list.
  *   GET  /healthz       Liveness check + a synthetic `claude --version`.
  *
@@ -99,9 +102,11 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 // (which requires an API key). Override with PROXY_AVAILABLE_MODELS as a
 // comma-separated list of `id` or `id:Display Name` entries.
 const DEFAULT_AVAILABLE_MODELS = [
+  { id: "claude-opus-5",             display_name: "Claude Opus 5",     created_at: "2026-07-01T00:00:00Z" },
   { id: "claude-opus-4-8",           display_name: "Claude Opus 4.8",   created_at: "2026-06-01T00:00:00Z" },
   { id: "claude-fable-5",            display_name: "Claude Fable 5",    created_at: "2026-07-01T00:00:00Z" },
   { id: "claude-sonnet-5",           display_name: "Claude Sonnet 5",   created_at: "2026-05-15T00:00:00Z" },
+  { id: "claude-sonnet-4-6",         display_name: "Claude Sonnet 4.6", created_at: "2026-03-01T00:00:00Z" },
   { id: "claude-haiku-4-5-20251001", display_name: "Claude Haiku 4.5",  created_at: "2025-10-01T00:00:00Z" },
 ];
 
@@ -118,6 +123,16 @@ const AVAILABLE_MODELS = (() => {
     };
   });
 })();
+
+// Anthropic itself has no live model-listing endpoint reachable via OAuth
+// (see the /v1/models comment above), so this same static list doubles as
+// the dispatch-time allowlist: a caller can no longer slip a typo'd or
+// nonexistent model name past us into a `claude` subprocess spawn, where it
+// would previously surface as a slow, misleading CLI/upstream error instead
+// of an immediate, clear one.
+function isKnownModel(modelName) {
+  return AVAILABLE_MODELS.some((m) => m.id === modelName);
+}
 
 // Resolver picked at boot via PROXY_RESOLVER (default: 'file'). The
 // dispatcher's create() is async because resolvers may do I/O at
@@ -689,6 +704,9 @@ async function handleMessages(req, res) {
   if (!validation.ok) {
     return errorResponse(res, 400, "invalid_request_error", validation.error);
   }
+  if (!isKnownModel(body.model)) {
+    return errorResponse(res, 404, "not_found_error", `model not found: ${body.model}`);
+  }
 
   let ctx;
   try {
@@ -903,6 +921,9 @@ async function handleChatCompletions(req, res) {
   const validation = validateMessagesBody(body);
   if (!validation.ok) {
     return errorResponse(res, 400, "invalid_request_error", validation.error);
+  }
+  if (!isKnownModel(body.model)) {
+    return errorResponse(res, 404, "not_found_error", `model not found: ${body.model}`);
   }
 
   let ctx;
