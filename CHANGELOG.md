@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.4](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.3...v0.6.4) (2026-07-29)
+
+
+### Bug Fixes
+
+* **sse:** stream structured output as tool_use, not empty text ([88746ba](https://github.com/haexhub/haex-claude-proxy/commit/88746ba4c9f5c48b84d6d8bb0130a87288fb9dda))
+* **sse:** stream structured output as tool_use, not empty text ([88c94dc](https://github.com/haexhub/haex-claude-proxy/commit/88c94dcdc9dbf68a7b26fe46298faabf6721a11d))
+
 ## [0.6.3](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.2...v0.6.3) (2026-07-29)
 
 
