@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.3](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.2...v0.6.3) (2026-07-29)
+
+
+### Bug Fixes
+
+* **models:** update stale model list, reject unknown models before CLI spawn ([1dc25cd](https://github.com/haexhub/haex-claude-proxy/commit/1dc25cd5a0e29dbf0eb8e137eea49c2cedb422ca))
+* **models:** update stale model list, reject unknown models before CLI spawn ([ddd96b6](https://github.com/haexhub/haex-claude-proxy/commit/ddd96b6218b6435b3e9f27b66e81e55486338d9c))
+
 ## [0.6.2](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.1...v0.6.2) (2026-07-29)
 
 
