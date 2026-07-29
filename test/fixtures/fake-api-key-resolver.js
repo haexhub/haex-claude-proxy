@@ -5,7 +5,7 @@ export function create(env) {
     name: "fake-api-key",
     async resolve(_req) {
       return {
-        mode: "api_key",
+        mode: env.FAKE_ANTHROPIC_MODE || "api_key",
         provider: "anthropic",
         apiKey: env.FAKE_ANTHROPIC_API_KEY || "upstream-key",
         baseUrl: env.FAKE_ANTHROPIC_BASE_URL,

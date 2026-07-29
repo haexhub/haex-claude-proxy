@@ -109,7 +109,7 @@ on `:8080` (override with `PORT`).
 | `PROXY_CREDENTIALS_HOME` | — | Used by `file` resolver and `/setup/*` |
 | `PROXY_TOKEN_MAP` | — | Used by `token-map` resolver |
 | `PROXY_SETUP_TOKEN` | — | Enables `/setup/*` when set |
-| `ALLOWED_FORWARD_HOSTS` | `api.anthropic.com` | Comma-separated allowlist for `api_key`-mode forwarding |
+| `PROXY_ALLOWED_FORWARD_HOSTS` | `api.anthropic.com` | Comma-separated allowlist for `api_key`-mode forwarding |
 | `PROXY_UPSTREAM_TIMEOUT_MS` | `120000` | Per-request timeout when forwarding |
 | `CLAUDE_BIN` | `claude` | Path to the `claude` CLI binary |
 

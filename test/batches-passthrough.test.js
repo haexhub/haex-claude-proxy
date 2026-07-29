@@ -131,3 +131,43 @@ test("forwards Anthropic Message Batches for api_key credentials", async (t) => 
   assert.equal(seen[1].method, "GET");
   assert.equal(seen[1].url, "/v1/messages/batches/msgbatch_test/results");
 });
+
+test("rejects Message Batches for non-api_key credentials", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "hcp-batches-reject-"));
+  const fakeClaudePath = join(dir, "fake-claude.js");
+  await writeFile(fakeClaudePath, FAKE_CLAUDE);
+  await chmod(fakeClaudePath, 0o755);
+
+  const proxyPort = 10000 + Math.floor(Math.random() * 20000);
+  const proc = spawn(process.execPath, [new URL("../src/server.js", import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PORT: String(proxyPort),
+      CLAUDE_BIN: fakeClaudePath,
+      PROXY_RESOLVER: fileURLToPath(new URL("./fixtures/fake-api-key-resolver.js", import.meta.url)),
+      FAKE_ANTHROPIC_MODE: "oauth_claude",
+      FAKE_ANTHROPIC_BASE_URL: "https://127.0.0.1:1",
+      FAKE_ANTHROPIC_API_KEY: "unused",
+      PROXY_ALLOWED_FORWARD_HOSTS: "127.0.0.1",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  t.after(async () => {
+    proc.kill();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  await waitForHealthz(proxyPort, 5000);
+
+  const res = await fetch(`http://127.0.0.1:${proxyPort}/v1/messages/batches`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": "proxy-session-token",
+      "anthropic-version": "2023-06-01",
+    },
+    body: JSON.stringify({ requests: [{ custom_id: "request_0", params: { model: "claude-haiku-4-5" } }] }),
+  });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error.message, /Anthropic api_key credential/);
+});

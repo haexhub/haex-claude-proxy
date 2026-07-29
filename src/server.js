@@ -462,13 +462,20 @@ function resolveForwardTarget(rawBase, targetPath = "/v1/messages", search = "")
       error: `host '${host}' is not in PROXY_ALLOWED_FORWARD_HOSTS - refusing to forward`,
     };
   }
-  // Drop trailing slashes / paths beyond the origin so we always hit the
-  // requested Anthropic API path on the resolved host regardless of how the tenant
-  // wrote their baseUrl.
-  if (!targetPath.startsWith("/v1/messages")) {
+  let target;
+  try {
+    target = new URL(`${targetPath}${search}`, parsed.origin);
+  } catch {
+    return { error: `invalid forward path: ${targetPath}` };
+  }
+  // Check the normalized pathname (post `.`/`..` resolution), not the raw
+  // targetPath — otherwise `/v1/messages/../admin` passes the literal prefix
+  // check but resolves to a different, non-allowlisted path once fetch()
+  // sends it.
+  if (!target.pathname.startsWith("/v1/messages")) {
     return { error: `forward path not allowed: ${targetPath}` };
   }
-  return { url: `${parsed.origin}${targetPath}${search}` };
+  return { url: target.toString() };
 }
 
 async function forwardAnthropicMessages(req, res, body, ctx) {
@@ -590,7 +597,7 @@ async function forwardAnthropicApiRequest(req, res, ctx, pathname) {
   if (targetResolution.error) {
     return errorResponse(res, 400, "invalid_request_error", targetResolution.error);
   }
-  let rawBody = "";
+  let rawBody = Buffer.alloc(0);
   if (!["GET", "HEAD"].includes(req.method)) {
     try {
       rawBody = await readRawBody(req);
@@ -623,7 +630,7 @@ async function forwardAnthropicApiRequest(req, res, ctx, pathname) {
     upstream = await fetch(targetResolution.url, {
       method: req.method,
       headers,
-      body: rawBody ? rawBody : undefined,
+      body: rawBody.length ? rawBody : undefined,
       signal: controller.signal,
     });
   } catch (e) {
@@ -1136,9 +1143,9 @@ function readJsonBody(req) {
 
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
-    let data = "";
-    req.on("data", (chunk) => { data += chunk.toString(); });
-    req.on("end", () => resolve(data));
+    const chunks = [];
+    req.on("data", (chunk) => { chunks.push(chunk); });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
 }
