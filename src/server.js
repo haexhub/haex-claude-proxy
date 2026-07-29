@@ -1016,6 +1016,15 @@ function bufferedResponse(proc, res, model) {
  * Call claude non-streaming, then emit the result as Anthropic SSE events so
  * the Anthropic Python SDK on the other end sees a valid streaming response.
  * This avoids --verbose / stream-json which creates ~35K cache tokens per call.
+ *
+ * Emits whichever block `claudeJsonToAnthropic` produced — text OR the
+ * `final_result` tool_use carrying `--json-schema` structured output. Assuming
+ * a text block here (regression, fixed 2026-07-29) streamed an EMPTY text
+ * block for every structured-output call and dropped the tool_use entirely:
+ * a `tool_use` block has no `.text`. Callers like pydantic-ai then saw an
+ * empty response with `stop_reason: "tool_use"` but no tool call, retried
+ * three times and failed the run ("Exceeded maximum output retries") — while
+ * every retry paid for the model's full work.
  */
 function bufferedThenSSE(proc, res, model) {
   let stdout = "";
@@ -1035,7 +1044,7 @@ function bufferedThenSSE(proc, res, model) {
     try { parsed = JSON.parse(stdout); }
     catch (e) { errorResponse(res, 502, "api_error", `failed to parse claude output: ${e.message}`); return; }
     const anthropicResp = claudeJsonToAnthropic(parsed, model);
-    const text = anthropicResp.content?.[0]?.text ?? "";
+    const block = anthropicResp.content?.[0] ?? { type: "text", text: "" };
     const u = anthropicResp.usage ?? {};
 
     res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "connection": "keep-alive" });
@@ -1043,9 +1052,18 @@ function bufferedThenSSE(proc, res, model) {
       type: "message_start",
       message: { id: anthropicResp.id, type: "message", role: "assistant", model: anthropicResp.model, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: u.input_tokens, output_tokens: 1 } },
     });
-    sendSSE(res, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
-    sendSSE(res, "ping", { type: "ping" });
-    sendSSE(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } });
+    if (block.type === "tool_use") {
+      // Anthropic streams a tool call as an empty-input content_block_start
+      // followed by input_json_delta chunks; one chunk with the whole JSON is
+      // a valid stream and is what SDKs accumulate and parse.
+      sendSSE(res, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: block.id, name: block.name, input: {} } });
+      sendSSE(res, "ping", { type: "ping" });
+      sendSSE(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: JSON.stringify(block.input ?? {}) } });
+    } else {
+      sendSSE(res, "content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
+      sendSSE(res, "ping", { type: "ping" });
+      sendSSE(res, "content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: block.text ?? "" } });
+    }
     sendSSE(res, "content_block_stop", { type: "content_block_stop", index: 0 });
     sendSSE(res, "message_delta", { type: "message_delta", delta: { stop_reason: anthropicResp.stop_reason ?? "end_turn", stop_sequence: null }, usage: { output_tokens: u.output_tokens } });
     sendSSE(res, "message_stop", { type: "message_stop" });
