@@ -62,6 +62,9 @@ pnpm start
 ## Endpoints
 
 - `POST /v1/messages` — Anthropic Messages API.
+- `/v1/messages/batches...` — explicit Anthropic Message Batches passthrough
+  for clients that call the Batches API path with `api_key` resolver
+  credentials. Normal `/v1/messages` requests never switch to batch mode.
 - `POST /v1/chat/completions` — OpenAI-compatible alias (also accepts
   `/chat/completions` without the `/v1` prefix).
 - `GET /v1/models` — static list (Claude Code probes this on startup).
@@ -106,7 +109,7 @@ on `:8080` (override with `PORT`).
 | `PROXY_CREDENTIALS_HOME` | — | Used by `file` resolver and `/setup/*` |
 | `PROXY_TOKEN_MAP` | — | Used by `token-map` resolver |
 | `PROXY_SETUP_TOKEN` | — | Enables `/setup/*` when set |
-| `ALLOWED_FORWARD_HOSTS` | `api.anthropic.com` | Comma-separated allowlist for `api_key`-mode forwarding |
+| `PROXY_ALLOWED_FORWARD_HOSTS` | `api.anthropic.com` | Comma-separated allowlist for `api_key`-mode forwarding |
 | `PROXY_UPSTREAM_TIMEOUT_MS` | `120000` | Per-request timeout when forwarding |
 | `CLAUDE_BIN` | `claude` | Path to the `claude` CLI binary |
 

@@ -265,6 +265,9 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && pathname === "/v1/messages") {
     return handleMessages(req, res);
   }
+  if (pathname === "/v1/messages/batches" || pathname.startsWith("/v1/messages/batches/")) {
+    return handleAnthropicPassthrough(req, res, pathname);
+  }
   if (req.method === "POST" && (pathname === "/v1/chat/completions" || pathname === "/chat/completions")) {
     return handleChatCompletions(req, res);
   }
@@ -443,7 +446,7 @@ async function writeMcpConfigFile(config) {
   return filePath;
 }
 
-function resolveForwardTarget(rawBase) {
+function resolveForwardTarget(rawBase, targetPath = "/v1/messages", search = "") {
   let parsed;
   try {
     parsed = new URL(rawBase || ANTHROPIC_DEFAULT_BASE);
@@ -459,10 +462,20 @@ function resolveForwardTarget(rawBase) {
       error: `host '${host}' is not in PROXY_ALLOWED_FORWARD_HOSTS - refusing to forward`,
     };
   }
-  // Drop trailing slashes / paths beyond the origin so we always hit
-  // `/v1/messages` on the resolved host regardless of how the tenant
-  // wrote their baseUrl.
-  return { url: `${parsed.origin}/v1/messages` };
+  let target;
+  try {
+    target = new URL(`${targetPath}${search}`, parsed.origin);
+  } catch {
+    return { error: `invalid forward path: ${targetPath}` };
+  }
+  // Check the normalized pathname (post `.`/`..` resolution), not the raw
+  // targetPath — otherwise `/v1/messages/../admin` passes the literal prefix
+  // check but resolves to a different, non-allowlisted path once fetch()
+  // sends it.
+  if (!target.pathname.startsWith("/v1/messages")) {
+    return { error: `forward path not allowed: ${targetPath}` };
+  }
+  return { url: target.toString() };
 }
 
 async function forwardAnthropicMessages(req, res, body, ctx) {
@@ -548,6 +561,107 @@ async function forwardAnthropicMessages(req, res, body, ctx) {
     } else {
       console.error("[proxy] forward stream error:", e.message);
     }
+  } finally {
+    clearTimeout(timeoutId);
+    req.off("close", onClientClose);
+    try { reader.cancel(); } catch { /* already closed */ }
+    res.end();
+  }
+}
+
+async function handleAnthropicPassthrough(req, res, pathname) {
+  let ctx;
+  try {
+    ctx = await resolver.resolve(req);
+  } catch (e) {
+    console.error("[proxy] resolver.resolve threw:", e);
+    return errorResponse(res, 500, "api_error", `resolver failure: ${e?.message ?? "unknown error"}`);
+  }
+  if (ctx.error) {
+    return errorResponse(res, ctx.error.status, ctx.error.type, ctx.error.message);
+  }
+  if (ctx.mode !== "api_key" || ctx.provider !== "anthropic") {
+    return errorResponse(
+      res,
+      400,
+      "invalid_request_error",
+      "Message Batches require an Anthropic api_key credential; OAuth/claude-CLI credentials only support /v1/messages",
+    );
+  }
+  return forwardAnthropicApiRequest(req, res, ctx, pathname);
+}
+
+async function forwardAnthropicApiRequest(req, res, ctx, pathname) {
+  const search = new URL(req.url, "http://proxy.local").search;
+  const targetResolution = resolveForwardTarget(ctx.baseUrl, pathname, search);
+  if (targetResolution.error) {
+    return errorResponse(res, 400, "invalid_request_error", targetResolution.error);
+  }
+  let rawBody = Buffer.alloc(0);
+  if (!["GET", "HEAD"].includes(req.method)) {
+    try {
+      rawBody = await readRawBody(req);
+    } catch (e) {
+      return errorResponse(res, 400, "invalid_request_error", `body read failed: ${e.message}`);
+    }
+  }
+
+  const headers = {
+    "x-api-key": ctx.apiKey,
+    "anthropic-version": typeof req.headers["anthropic-version"] === "string"
+      ? req.headers["anthropic-version"]
+      : ANTHROPIC_API_VERSION,
+    accept: typeof req.headers.accept === "string" ? req.headers.accept : "application/json",
+  };
+  const contentType = req.headers["content-type"];
+  if (typeof contentType === "string" && contentType) headers["content-type"] = contentType;
+  const beta = req.headers["anthropic-beta"];
+  if (typeof beta === "string" && beta) headers["anthropic-beta"] = beta;
+
+  console.log("[proxy] forward api_key %s %s target=%s", req.method, pathname, targetResolution.url);
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(new Error("upstream timeout")), UPSTREAM_TIMEOUT_MS);
+  const onClientClose = () => controller.abort(new Error("client disconnect"));
+  req.on("close", onClientClose);
+
+  let upstream;
+  try {
+    upstream = await fetch(targetResolution.url, {
+      method: req.method,
+      headers,
+      body: rawBody.length ? rawBody : undefined,
+      signal: controller.signal,
+    });
+  } catch (e) {
+    clearTimeout(timeoutId);
+    req.off("close", onClientClose);
+    const isAbort = e.name === "AbortError";
+    return errorResponse(
+      res,
+      isAbort ? 504 : 502,
+      "api_error",
+      isAbort ? `upstream aborted: ${controller.signal.reason?.message ?? "unknown"}` : `upstream fetch failed: ${e.message}`,
+    );
+  }
+
+  const contentTypeOut = upstream.headers.get("content-type") || "application/json";
+  res.writeHead(upstream.status, { "content-type": contentTypeOut });
+  if (!upstream.body) {
+    clearTimeout(timeoutId);
+    req.off("close", onClientClose);
+    res.end();
+    return;
+  }
+  const reader = upstream.body.getReader();
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) res.write(Buffer.from(value));
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") console.error("[proxy] passthrough stream error:", e.message);
   } finally {
     clearTimeout(timeoutId);
     req.off("close", onClientClose);
@@ -1027,6 +1141,15 @@ function readJsonBody(req) {
   });
 }
 
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on("data", (chunk) => { chunks.push(chunk); });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
 function errorResponse(res, status, type, message) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify({ type: "error", error: { type, message } }));
@@ -1152,4 +1275,3 @@ async function handleSetup(req, res, pathname) {
   res.writeHead(404, { "content-type": "application/json" });
   res.end(JSON.stringify({ type: "error", error: { type: "not_found", message: `${req.method} ${pathname}` } }));
 }
-
