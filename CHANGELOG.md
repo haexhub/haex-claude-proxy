@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.2](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.1...v0.6.2) (2026-07-29)
+
+
+### Bug Fixes
+
+* address CodeRabbit review on PR [#35](https://github.com/haexhub/haex-claude-proxy/issues/35) ([89f6420](https://github.com/haexhub/haex-claude-proxy/commit/89f64204b941189f8f3a97fde8e356d992c15bb2))
+
 ## [0.6.1](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.0...v0.6.1) (2026-07-25)
 
 
