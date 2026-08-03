@@ -13,7 +13,7 @@
     "test": "node --test test/*.test.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0"
+    "@modelcontextprotocol/sdk": "^1.30.0"
   },
   "optionalDependencies": {
     "node-pty": "^1.1.0"
