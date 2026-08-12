@@ -82,7 +82,7 @@ import {
   openAIBodyToAnthropic,
   anthropicToOpenAIResponse,
 } from "./cli-format.js";
-import { acquireHomeLock } from "./home-lock.js";
+import { acquireHomeLockIfStale } from "./home-lock.js";
 import { createResolver } from "./resolvers/index.js";
 import { createSetupController } from "./setup-login.js";
 import { createAccountInfoReader } from "./account-info.js";
@@ -811,11 +811,11 @@ async function handleMessages(req, res) {
   });
   console.log("[proxy] prompt_len=%d stream_requested=%s images=%d bridged_tools=%d home=%s", promptText.length, body.stream, imageFiles.length, bridgeableTools.length, ctx.home);
 
-  // Serialize claude invocations sharing this credential HOME — see
-  // home-lock.js for why (the CLI's own token-refresh-and-save has no
-  // locking; concurrent invocations against an expired token corrupt
-  // credentials.json).
-  const releaseHomeLock = await acquireHomeLock(ctx.home);
+  // Only serialize claude invocations sharing this credential HOME while its
+  // token is close enough to expiry that this invocation could trigger a
+  // refresh — see home-lock.js for why concurrent refreshes corrupt
+  // credentials.json. Requests against a fresh token run fully in parallel.
+  const releaseHomeLock = await acquireHomeLockIfStale(ctx.home);
   const proc = spawn(CLAUDE_BIN, [...cliArgs, "--print", promptText], {
     stdio: ["ignore", "pipe", "pipe"],
     env: envForHome(ctx.home),
@@ -949,9 +949,9 @@ async function handleChatCompletions(req, res) {
   const { promptText, systemText } = anthropicMessagesToPrompt(body);
   const cliArgs = buildClaudeArgs({ model: body.model, systemPrompt: systemText, streaming: body.stream === true });
 
-  // Serialize claude invocations sharing this credential HOME — see
-  // home-lock.js / the matching comment in handleMessages.
-  const releaseHomeLock = await acquireHomeLock(ctx.home);
+  // Only serialize while the token is close to expiry — see the matching
+  // comment in handleMessages / home-lock.js.
+  const releaseHomeLock = await acquireHomeLockIfStale(ctx.home);
   const proc = spawn(CLAUDE_BIN, [...cliArgs, "--print", promptText], {
     stdio: ["ignore", "pipe", "pipe"],
     env: envForHome(ctx.home),
