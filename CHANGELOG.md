@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.5](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.4...v0.6.5) (2026-08-12)
+
+
+### Bug Fixes
+
+* **home-lock:** retroactive release-please marker for [#47](https://github.com/haexhub/haex-claude-proxy/issues/47) ([62ca51f](https://github.com/haexhub/haex-claude-proxy/commit/62ca51fb8ca693f94cb5d8759dce4224017fa5f6))
+* **home-lock:** serialize only near token expiry, otherwise real parallelism ([ef79564](https://github.com/haexhub/haex-claude-proxy/commit/ef79564eacab730a03a3dd7aa9bbf085ea776cc5))
+
 ## [0.6.4](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.3...v0.6.4) (2026-07-29)
 
 
