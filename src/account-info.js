@@ -41,7 +41,7 @@ export function createAccountInfoReader({
       throw new Error(`oauth/profile responded ${res.status}`);
     }
     const profile = await res.json();
-    return profile?.emailAddress ?? null;
+    return profile?.account?.email ?? null;
   }
 
   return {

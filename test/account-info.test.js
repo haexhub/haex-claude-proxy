@@ -28,7 +28,7 @@ test("account-info: reads organizationUuid and subscriptionType from disk, email
       calledWith = { url, opts };
       return {
         ok: true,
-        json: async () => ({ emailAddress: "person@example.com" }),
+        json: async () => ({ account: { email: "person@example.com" } }),
       };
     },
   });
@@ -77,7 +77,7 @@ test("account-info: caches the result within the TTL, keyed by home", async () =
   const reader = createAccountInfoReader({
     fetchImpl: async () => {
       calls += 1;
-      return { ok: true, json: async () => ({ emailAddress: "person@example.com" }) };
+      return { ok: true, json: async () => ({ account: { email: "person@example.com" } }) };
     },
     now: () => clock,
     cacheTtlMs: 1000,
