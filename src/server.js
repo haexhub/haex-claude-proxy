@@ -973,7 +973,8 @@ async function handleChatCompletions(req, res) {
   proc.on("error", (e) => errorResponse(res, 500, "api_error", `claude spawn failed: ${e.message}`));
   proc.on("close", (code) => {
     if (code !== 0) {
-      return errorResponse(res, 502, "api_error", `claude exit ${code}: ${stderr.trim() || "no stderr"}`);
+      sessionLimitOr502(res, stdout, stderr, `claude exit ${code}: ${stderr.trim() || "no stderr"}`);
+      return;
     }
     let parsed;
     try { parsed = JSON.parse(stdout); }
@@ -998,7 +999,8 @@ function bufferedResponse(proc, res, model) {
   proc.on("close", (code) => {
     console.log("[proxy] claude exit=%d stdout_len=%d stderr=%s", code, stdout.length, stderr.slice(0, 200));
     if (code !== 0) {
-      return errorResponse(res, 502, "api_error", `claude exit ${code}: ${stderr.trim() || stdout.slice(0,200) || "no output"}`);
+      sessionLimitOr502(res, stdout, stderr, `claude exit ${code}: ${stderr.trim() || stdout.slice(0,200) || "no output"}`);
+      return;
     }
     let parsed;
     try {
@@ -1037,7 +1039,7 @@ function bufferedThenSSE(proc, res, model) {
     if (code !== 0) {
       let detail = stderr.trim();
       try { const j = JSON.parse(stdout); if (j?.is_error && j?.result) detail = j.result; } catch { /* ignore */ }
-      errorResponse(res, 502, "api_error", detail || `claude exit ${code}`);
+      sessionLimitOr502(res, stdout, stderr, detail || `claude exit ${code}`);
       return;
     }
     let parsed;
@@ -1192,6 +1194,32 @@ function readRawBody(req) {
 function errorResponse(res, status, type, message) {
   res.writeHead(status, { "content-type": "application/json" });
   res.end(JSON.stringify({ type: "error", error: { type, message } }));
+}
+
+/**
+ * Whether a non-zero `claude --print` exit is the CLI's own session-usage-
+ * limit notice ("You've hit your session limit · resets 8:10am (UTC)") rather
+ * than a genuine per-request failure. It prints this to stdout and still
+ * exits non-zero with empty stderr, so callers can't otherwise tell it apart
+ * from a real error — every non-streaming handler below used to report it as
+ * a plain 502, which a caller can't distinguish from "this specific request
+ * is broken" and may end up penalizing (retry lockout, failure counters) the
+ * request that happened to be in flight when a temporary, account-wide
+ * capacity window closed.
+ */
+function isSessionLimitMessage(text) {
+  return /session limit/i.test(text);
+}
+
+/** 429 lets callers apply their existing rate-limit retry/backoff instead of
+ *  treating this like a genuine per-request failure (see isSessionLimitMessage). */
+function sessionLimitOr502(res, stdout, stderr, fallbackMessage) {
+  if (isSessionLimitMessage(stdout) || isSessionLimitMessage(stderr)) {
+    errorResponse(res, 429, "rate_limit_error", (stdout || stderr).trim());
+    return true;
+  }
+  errorResponse(res, 502, "api_error", fallbackMessage);
+  return false;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
