@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.7](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.6...v0.6.7) (2026-08-24)
+
+
+### Bug Fixes
+
+* erkenne 'weekly limit'-Meldung als 429 ([bf98ae6](https://github.com/haexhub/haex-claude-proxy/commit/bf98ae69ddce71ab275ccbc20c052757691fe268))
+* erkenne auch 'weekly limit'-Meldung der CLI als 429 ([4e6d053](https://github.com/haexhub/haex-claude-proxy/commit/4e6d0530f5a102da53bcc830f7cfe6108f9ca07d))
+
 ## [0.6.6](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.5...v0.6.6) (2026-08-20)
 
 
