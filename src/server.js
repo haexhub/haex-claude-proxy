@@ -1197,18 +1197,19 @@ function errorResponse(res, status, type, message) {
 }
 
 /**
- * Whether a non-zero `claude --print` exit is the CLI's own session-usage-
- * limit notice ("You've hit your session limit · resets 8:10am (UTC)") rather
- * than a genuine per-request failure. It prints this to stdout and still
- * exits non-zero with empty stderr, so callers can't otherwise tell it apart
- * from a real error — every non-streaming handler below used to report it as
- * a plain 502, which a caller can't distinguish from "this specific request
- * is broken" and may end up penalizing (retry lockout, failure counters) the
- * request that happened to be in flight when a temporary, account-wide
- * capacity window closed.
+ * Whether a non-zero `claude --print` exit is the CLI's own usage-limit
+ * notice ("You've hit your session limit · resets 8:10am (UTC)" or "...
+ * weekly limit · resets Aug 28, 3am (UTC)") rather than a genuine per-request
+ * failure. It prints this to stdout and still exits non-zero with empty
+ * stderr, so callers can't otherwise tell it apart from a real error — every
+ * non-streaming handler below used to report it as a plain 502, which a
+ * caller can't distinguish from "this specific request is broken" and may
+ * end up penalizing (retry lockout, failure counters) the request that
+ * happened to be in flight when a temporary, account-wide capacity window
+ * closed.
  */
 function isSessionLimitMessage(text) {
-  return /session limit/i.test(text);
+  return /\b(session|weekly)\s+limit\b/i.test(text);
 }
 
 /** 429 lets callers apply their existing rate-limit retry/backoff instead of
