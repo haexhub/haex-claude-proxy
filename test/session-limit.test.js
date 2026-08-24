@@ -19,6 +19,11 @@ process.stdout.write("You've hit your session limit \\u00b7 resets 8:10am (UTC)\
 process.exit(1);
 `;
 
+const FAKE_CLAUDE_WEEKLY_LIMIT = `#!/usr/bin/env node
+process.stdout.write("You've hit your weekly limit \\u00b7 resets Aug 28, 3am (UTC)\\n");
+process.exit(1);
+`;
+
 const FAKE_CLAUDE_OTHER_FAILURE = `#!/usr/bin/env node
 process.stderr.write("some unrelated crash\\n");
 process.exit(1);
@@ -84,6 +89,23 @@ test("POST /v1/messages reports the session-limit notice as 429, not 502", async
   const body = await res.json();
   assert.equal(body.error.type, "rate_limit_error");
   assert.match(body.error.message, /session limit/i);
+});
+
+test("POST /v1/messages reports the weekly-limit notice as 429, not 502", async (t) => {
+  const port = await startServer(t, FAKE_CLAUDE_WEEKLY_LIMIT);
+  const res = await fetch(`http://127.0.0.1:${port}/v1/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      model: "claude-sonnet-4-6",
+      max_tokens: 64,
+      messages: [{ role: "user", content: "hi" }],
+    }),
+  });
+  assert.equal(res.status, 429);
+  const body = await res.json();
+  assert.equal(body.error.type, "rate_limit_error");
+  assert.match(body.error.message, /weekly limit/i);
 });
 
 test("POST /v1/chat/completions reports the session-limit notice as 429, not 502", async (t) => {
