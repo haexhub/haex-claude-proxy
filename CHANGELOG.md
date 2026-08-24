@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.7](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.6...v0.6.7) (2026-08-24)
+
+
+### Bug Fixes
+
+* erkenne 'weekly limit'-Meldung als 429 ([bf98ae6](https://github.com/haexhub/haex-claude-proxy/commit/bf98ae69ddce71ab275ccbc20c052757691fe268))
+* erkenne auch 'weekly limit'-Meldung der CLI als 429 ([4e6d053](https://github.com/haexhub/haex-claude-proxy/commit/4e6d0530f5a102da53bcc830f7cfe6108f9ca07d))
+
+## [0.6.6](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.5...v0.6.6) (2026-08-20)
+
+
+### Bug Fixes
+
+* emailAddress in accountInfo kam nie an ([4a8e2f4](https://github.com/haexhub/haex-claude-proxy/commit/4a8e2f40f2709a1ec2eb4abb0ef8f12575ab6839))
+* oauth/profile Response hat kein emailAddress-Feld, nur account.email ([938bc4d](https://github.com/haexhub/haex-claude-proxy/commit/938bc4dcf36ceb0460f2572fa858dadb98139e0c))
+
 ## [0.6.5](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.4...v0.6.5) (2026-08-12)
 
 
