@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.8](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.7...v0.6.8) (2026-08-31)
+
+
+### Bug Fixes
+
+* kill orphaned claude CLI subprocess when the client disconnects ([c2b7466](https://github.com/haexhub/haex-claude-proxy/commit/c2b7466b0289c5bd0b0e03ef359a23a051777e5e))
+* kill orphaned claude CLI subprocess when the client disconnects ([e0df2eb](https://github.com/haexhub/haex-claude-proxy/commit/e0df2eb3590ef252320e85b60384ce3e633edce2))
+
 ## [0.6.7](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.6...v0.6.7) (2026-08-24)
 
 
