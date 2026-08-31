@@ -418,6 +418,49 @@ const ALLOWED_FORWARD_HOSTS = (() => {
 // case a deploy needs a longer budget.
 const UPSTREAM_TIMEOUT_MS = Number(process.env.PROXY_UPSTREAM_TIMEOUT_MS ?? 120_000);
 
+// Same idea as UPSTREAM_TIMEOUT_MS, but for the spawned `claude` CLI path
+// (OAuth/subscription mode) rather than the api_key fetch-forward path.
+// Generous default: a large multimodal request (many scanned-PDF page
+// images) has been observed taking ~5min. Only exists as a last-resort
+// backstop against a genuinely hung subprocess — see killOnDisconnect.
+const CLI_TIMEOUT_MS = Number(process.env.PROXY_CLI_TIMEOUT_MS ?? 600_000);
+
+// The fetch-forward path (forwardAnthropicMessages) already aborts its
+// upstream call when the client disconnects — see its onClientClose. The
+// spawned-CLI path had no equivalent: an abandoned request (client gave up
+// waiting) let `claude` keep running to completion regardless, burning real
+// subscription quota on a result nobody would ever read. Confirmed live
+// 2026-08-31: a request that legitimately took 288s (large multimodal
+// payload) succeeded 48s after the caller's 240s timeout had already given
+// up and moved on.
+//
+// Killing the process here is enough on its own — the caller's existing
+// `proc.on("close", ...)` still fires for a killed process exactly like a
+// normal exit, so cleanup (temp file unlink, home-lock release) is
+// unaffected. Callers must skip writing to `res` once the client is known
+// gone (`res.destroyed`) since the underlying socket is already closed.
+function killOnDisconnect(res, proc) {
+  const timer = setTimeout(() => {
+    console.error("[proxy] claude CLI exceeded %dms, killing", CLI_TIMEOUT_MS);
+    proc.kill("SIGTERM");
+  }, CLI_TIMEOUT_MS);
+  // req.on("close") does not fire reliably here once the request body has
+  // already been fully read (confirmed empirically against this Node
+  // runtime) — res.on("close") does, for both the normal case (fires after
+  // our own res.end()) and the premature-disconnect case (fires as soon as
+  // the underlying socket dies, with res.destroyed already true by then).
+  const onResClose = () => {
+    if (res.writableEnded) return; // normal completion, not a disconnect
+    console.log("[proxy] client disconnected, killing claude CLI");
+    proc.kill("SIGTERM");
+  };
+  res.on("close", onResClose);
+  proc.on("close", () => {
+    clearTimeout(timer);
+    res.off("close", onResClose);
+  });
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // MCP tool bridge (see src/mcp-bridge/bridge-server.js + cli-format.js's
 // buildMcpBridgeConfig/extractToolCallback). Lets a caller's own function
@@ -820,6 +863,7 @@ async function handleMessages(req, res) {
     stdio: ["ignore", "pipe", "pipe"],
     env: envForHome(ctx.home),
   });
+  killOnDisconnect(res, proc);
   proc.on("close", () => {
     for (const f of imageFiles) fsp.unlink(f).catch(() => {});
     if (mcpConfigPath) fsp.unlink(mcpConfigPath).catch(() => {});
@@ -956,6 +1000,7 @@ async function handleChatCompletions(req, res) {
     stdio: ["ignore", "pipe", "pipe"],
     env: envForHome(ctx.home),
   });
+  killOnDisconnect(res, proc);
   proc.on("close", () => {
     postSpawnCleanup(ctx)
       .catch((e) => console.error("[proxy] postSpawnCleanup failed:", e.message))
@@ -972,6 +1017,7 @@ async function handleChatCompletions(req, res) {
   proc.stderr.on("data", (c) => { stderr += c.toString(); });
   proc.on("error", (e) => errorResponse(res, 500, "api_error", `claude spawn failed: ${e.message}`));
   proc.on("close", (code) => {
+    if (res.writableEnded || res.destroyed) return;
     if (code !== 0) {
       sessionLimitOr502(res, stdout, stderr, `claude exit ${code}: ${stderr.trim() || "no stderr"}`);
       return;
@@ -998,6 +1044,9 @@ function bufferedResponse(proc, res, model) {
   proc.on("error", (e) => errorResponse(res, 500, "api_error", `claude spawn failed: ${e.message}`));
   proc.on("close", (code) => {
     console.log("[proxy] claude exit=%d stdout_len=%d stderr=%s", code, stdout.length, stderr.slice(0, 200));
+    // killOnDisconnect already killed proc because the caller went away —
+    // res's underlying socket is gone, nothing to write a response to.
+    if (res.writableEnded || res.destroyed) return;
     if (code !== 0) {
       sessionLimitOr502(res, stdout, stderr, `claude exit ${code}: ${stderr.trim() || stdout.slice(0,200) || "no output"}`);
       return;
@@ -1036,6 +1085,7 @@ function bufferedThenSSE(proc, res, model) {
   proc.on("error", (e) => errorResponse(res, 500, "api_error", `claude spawn failed: ${e.message}`));
   proc.on("close", (code) => {
     console.log("[proxy] bufferedThenSSE claude exit=%d stderr=%s", code, stderr.slice(0, 200));
+    if (res.writableEnded || res.destroyed) return;
     if (code !== 0) {
       let detail = stderr.trim();
       try { const j = JSON.parse(stdout); if (j?.is_error && j?.result) detail = j.result; } catch { /* ignore */ }
@@ -1158,8 +1208,8 @@ function streamResponseOpenAI(proc, res, model) {
     }
   });
   proc.stderr.on("data", (c) => { stderrBuf += c.toString(); });
-  proc.on("error", () => { res.write("data: [DONE]\n\n"); res.end(); });
-  proc.on("close", () => { res.write("data: [DONE]\n\n"); res.end(); });
+  proc.on("error", () => { if (res.writableEnded || res.destroyed) return; res.write("data: [DONE]\n\n"); res.end(); });
+  proc.on("close", () => { if (res.writableEnded || res.destroyed) return; res.write("data: [DONE]\n\n"); res.end(); });
 }
 
 function sendSSE(res, event, data) {
