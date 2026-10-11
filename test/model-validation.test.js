@@ -52,6 +52,7 @@ async function startServer(t) {
     env: {
       ...process.env,
       PORT: String(port),
+      PROXY_AVAILABLE_MODELS: "",
       PROXY_RESOLVER: "file",
       PROXY_CREDENTIALS_HOME: credentialsHome,
       CLAUDE_BIN: fakeClaudePath,
