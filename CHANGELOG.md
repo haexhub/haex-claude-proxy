@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.7.0](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.8...v0.7.0) (2026-10-11)
+
+
+### Features
+
+* advertise the Claude 5.5 / 5.1 models ([3f9d220](https://github.com/haexhub/haex-claude-proxy/commit/3f9d220d5fc55c81f5cecfe4b5d8a0250c6ba47a))
+* advertise the Claude 5.5 / 5.1 models ([c8ce5e2](https://github.com/haexhub/haex-claude-proxy/commit/c8ce5e276d9af0a5eab27092e68a47c8bc026aa2))
+
 ## [0.6.8](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.7...v0.6.8) (2026-08-31)
 
 
