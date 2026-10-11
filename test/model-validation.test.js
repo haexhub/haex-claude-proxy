@@ -52,6 +52,7 @@ async function startServer(t) {
     env: {
       ...process.env,
       PORT: String(port),
+      PROXY_AVAILABLE_MODELS: "",
       PROXY_RESOLVER: "file",
       PROXY_CREDENTIALS_HOME: credentialsHome,
       CLAUDE_BIN: fakeClaudePath,
@@ -121,4 +122,13 @@ test("GET /v1/models includes the current Claude 5 family", async (t) => {
   const ids = body.data.map((m) => m.id);
   assert.ok(ids.includes("claude-opus-5"), `expected claude-opus-5 in ${ids}`);
   assert.ok(ids.includes("claude-sonnet-4-6"), `expected claude-sonnet-4-6 in ${ids}`);
+});
+
+test("GET /v1/models includes the 5.5 / 5.1 generation", async (t) => {
+  const port = await startServer(t);
+  const res = await fetch(`http://127.0.0.1:${port}/v1/models`);
+  const ids = (await res.json()).data.map((m) => m.id);
+  for (const id of ["claude-fable-5-1", "claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]) {
+    assert.ok(ids.includes(id), `expected ${id} in ${ids}`);
+  }
 });
