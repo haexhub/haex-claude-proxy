@@ -102,6 +102,10 @@ const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 // (which requires an API key). Override with PROXY_AVAILABLE_MODELS as a
 // comma-separated list of `id` or `id:Display Name` entries.
 const DEFAULT_AVAILABLE_MODELS = [
+  { id: "claude-fable-5-1",          display_name: "Claude Fable 5.1",  created_at: "2026-09-01T00:00:00Z" },
+  { id: "claude-opus-5-5",           display_name: "Claude Opus 5.5",   created_at: "2026-09-01T00:00:00Z" },
+  { id: "claude-sonnet-5-5",         display_name: "Claude Sonnet 5.5", created_at: "2026-09-01T00:00:00Z" },
+  { id: "claude-haiku-5-5",          display_name: "Claude Haiku 5.5",  created_at: "2026-09-01T00:00:00Z" },
   { id: "claude-opus-5",             display_name: "Claude Opus 5",     created_at: "2026-07-01T00:00:00Z" },
   { id: "claude-opus-4-8",           display_name: "Claude Opus 4.8",   created_at: "2026-06-01T00:00:00Z" },
   { id: "claude-fable-5",            display_name: "Claude Fable 5",    created_at: "2026-07-01T00:00:00Z" },
