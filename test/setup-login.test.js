@@ -100,6 +100,27 @@ test("controller: idle → awaiting-url → awaiting-code → done", async () =>
   assert.equal(ctrl.snapshot().state, States.DONE);
 });
 
+test("controller: extracts the URL from an OSC 8 hyperlink (CLI 2.1.25x+)", async () => {
+  const fake = makeFakePty();
+  const ctrl = createSetupController({
+    spawnPty: () => fake,
+    credentialsHome: await mkHomeDir(),
+  });
+  const urlPromise = ctrl.start();
+  // Byte layout captured from `claude auth login --claudeai` 2.1.296 under
+  // a PTY: ESC]8;;<url>BEL<url>ESC]8;;BEL, then CR.
+  const url = "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=s1";
+  fake.emit(`If the browser didn't open, visit: \x1b]8;;${url}\x07${url}\x1b]8;;\x07\r\n`);
+  assert.equal(await urlPromise, url);
+  assert.equal(ctrl.snapshot().state, States.AWAITING_CODE);
+  ctrl.reset();
+});
+
+test("OSC_SEQUENCE_RE: strips BEL- and ST-terminated sequences", () => {
+  const s = "a\x1b]8;;https://x\x07b\x1b]8;;\x1b\\c";
+  assert.equal(s.replace(_internal.OSC_SEQUENCE_RE, ""), "abc");
+});
+
 // ── Error paths ───────────────────────────────────────────────────────────
 
 test("controller: CLI exits non-zero → state ERROR, submitCode rejects", async () => {
