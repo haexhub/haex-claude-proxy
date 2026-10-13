@@ -41,6 +41,13 @@ export const States = Object.freeze({
 const URL_LINE_RE =
   /If the browser didn't open, visit:\s*(https:\/\/claude\.com\/cai\/oauth\/authorize\?[^\s]+)/i;
 
+// OSC escape sequences (`ESC ] … BEL` or `ESC ] … ESC \\`). Since CLI
+// 2.1.25x the URL line is wrapped in an OSC 8 terminal hyperlink —
+// `visit: ESC]8;;<url>BEL<url>ESC]8;;BEL` — so URL_LINE_RE no longer sees
+// `https://` right after `visit:`. Stripping them leaves the plain visible
+// URL, which is what older CLIs print anyway.
+const OSC_SEQUENCE_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
 // Cap on how much stdout we'll buffer waiting for the URL. The line is
 // always short (< 1 KB) and emitted within the first half-second; this
 // prevents an OOM if the CLI ever decided to go chatty.
@@ -166,7 +173,7 @@ export function createSetupController({
     }
 
     if (state === States.AWAITING_URL) {
-      const match = stdoutBuf.match(URL_LINE_RE);
+      const match = stdoutBuf.replace(OSC_SEQUENCE_RE, "").match(URL_LINE_RE);
       if (match) {
         oauthUrl = match[1];
         state = States.AWAITING_CODE;
@@ -387,5 +394,6 @@ export function createSetupController({
 // Exported for tests.
 export const _internal = {
   URL_LINE_RE,
+  OSC_SEQUENCE_RE,
   STDOUT_BUFFER_CAP,
 };
