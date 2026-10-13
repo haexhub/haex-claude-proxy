@@ -116,6 +116,26 @@ test("controller: extracts the URL from an OSC 8 hyperlink (CLI 2.1.25x+)", asyn
   ctrl.reset();
 });
 
+test("controller: extracts the URL from real node-pty output (OSC 8 + colored text)", async () => {
+  const fake = makeFakePty();
+  const ctrl = createSetupController({
+    spawnPty: () => fake,
+    credentialsHome: await mkHomeDir(),
+  });
+  const urlPromise = ctrl.start();
+  // Captured from `claude auth login --claudeai` 2.1.296 via node-pty at
+  // 100x30: the visible URL is wrapped in ESC[94m … ESC[39m as well.
+  const url = "https://claude.com/cai/oauth/authorize?code=true&client_id=x&state=s1";
+  fake.emit("Opening browser to sign in…\r\n");
+  fake.emit(`If the browser didn't open, visit: \x1b]8;;${url}\x07\x1b[94m${url}\x1b[39m\x1b]8;;\x07\r\nPaste code here if prompted > `);
+  assert.equal(await urlPromise, url);
+  ctrl.reset();
+});
+
+test("CSI_SEQUENCE_RE: strips color codes", () => {
+  assert.equal("a\x1b[94mb\x1b[39mc\x1b[0m".replace(_internal.CSI_SEQUENCE_RE, ""), "abc");
+});
+
 test("OSC_SEQUENCE_RE: strips BEL- and ST-terminated sequences", () => {
   const s = "a\x1b]8;;https://x\x07b\x1b]8;;\x1b\\c";
   assert.equal(s.replace(_internal.OSC_SEQUENCE_RE, ""), "abc");

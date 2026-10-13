@@ -47,6 +47,10 @@ const URL_LINE_RE =
 // `https://` right after `visit:`. Stripping them leaves the plain visible
 // URL, which is what older CLIs print anyway.
 const OSC_SEQUENCE_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+// CSI sequences (colors etc.). Under a real PTY the CLI also colors the
+// visible URL (`ESC[94m<url>ESC[39m`), which sits between `visit:` and
+// `https://` just like the OSC 8 wrapper does.
+const CSI_SEQUENCE_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
 
 // Cap on how much stdout we'll buffer waiting for the URL. The line is
 // always short (< 1 KB) and emitted within the first half-second; this
@@ -173,7 +177,7 @@ export function createSetupController({
     }
 
     if (state === States.AWAITING_URL) {
-      const match = stdoutBuf.replace(OSC_SEQUENCE_RE, "").match(URL_LINE_RE);
+      const match = stdoutBuf.replace(OSC_SEQUENCE_RE, "").replace(CSI_SEQUENCE_RE, "").match(URL_LINE_RE);
       if (match) {
         oauthUrl = match[1];
         state = States.AWAITING_CODE;
@@ -395,5 +399,6 @@ export function createSetupController({
 export const _internal = {
   URL_LINE_RE,
   OSC_SEQUENCE_RE,
+  CSI_SEQUENCE_RE,
   STDOUT_BUFFER_CAP,
 };
