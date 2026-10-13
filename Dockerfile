@@ -56,10 +56,15 @@ RUN case "$TARGETARCH" in \
 # never reaching the "paste code" prompt, both interactively and via PTY
 # automation; 2.1.191 reaches the prompt immediately. Bump only after
 # verifying both: the --print/json regression and a real OAuth login.
+# 2.1.296: required for claude-opus-5-5 (API rejects < 2.1.280) and
+# claude-fable-5-1 (< 2.1.251). Verified --print --output-format json against
+# claude-opus-5-5 / claude-sonnet-5-5, and that `auth login --claudeai`
+# reaches the "Paste code" prompt; it now prints the URL as an OSC 8
+# hyperlink, which setup-login.js strips before matching.
 # --allow-build: claude-code's postinstall fetches its platform-native
 # binary; pnpm blocks dependency build scripts by default (global installs
 # don't read the project's pnpm-workspace.yaml, so allow it per-command).
-RUN pnpm add -g --allow-build=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.191
+RUN pnpm add -g --allow-build=@anthropic-ai/claude-code @anthropic-ai/claude-code@2.1.296
 
 WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
