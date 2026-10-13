@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.0](https://github.com/haexhub/haex-claude-proxy/compare/v0.7.0...v0.8.0) (2026-10-13)
+
+
+### Features
+
+* bump claude CLI to 2.1.296 for Opus 5.5 / Fable 5.1 ([ffff613](https://github.com/haexhub/haex-claude-proxy/commit/ffff613976da8a6caa979bc26c7b2ab8b1a2b9b2))
+* bump claude CLI to 2.1.296 for Opus 5.5 / Fable 5.1 ([b5f8d54](https://github.com/haexhub/haex-claude-proxy/commit/b5f8d54f04857725c16a1d0ecd9f0dd731f68e1f))
+
 ## [0.7.0](https://github.com/haexhub/haex-claude-proxy/compare/v0.6.8...v0.7.0) (2026-10-11)
 
 
