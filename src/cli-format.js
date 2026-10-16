@@ -325,7 +325,15 @@ export function extractToolCallback(headers, allowedHosts) {
  * through natively via `--json-schema` when the caller passes `jsonSchema`
  * (see `extractOutputToolSchema`).
  *
- * @param {{model: string, systemPrompt: string|null, streaming: boolean, jsonSchema?: object|null, mcpConfigPath?: string|null, allowedToolNames?: string[]|null}} opts
+ * `addDirs` grants the CLI read access to extra directories. Image requests
+ * need it for the temp dir holding their `@path` images: the CLI resolves an
+ * `@path` mention only inside its working directory or an added one, and an
+ * image above a few hundred KB that is not covered comes back as prose
+ * ("no read access") instead of a vision result. Each entry gets its own
+ * `--add-dir` flag, and a flag always follows (`--allowed-tools`) because
+ * `--add-dir` takes a variadic list that would otherwise swallow the prompt.
+ *
+ * @param {{model: string, systemPrompt: string|null, streaming: boolean, jsonSchema?: object|null, mcpConfigPath?: string|null, allowedToolNames?: string[]|null, addDirs?: string[]}} opts
  * @returns {string[]}
  */
 export function buildClaudeArgs({
@@ -335,8 +343,10 @@ export function buildClaudeArgs({
   jsonSchema = null,
   mcpConfigPath = null,
   allowedToolNames = null,
+  addDirs = [],
 }) {
   const args = ["--no-session-persistence"];
+  for (const dir of addDirs) args.push("--add-dir", dir);
   if (mcpConfigPath && allowedToolNames?.length) {
     args.push("--mcp-config", mcpConfigPath, "--strict-mcp-config");
     args.push("--allowed-tools", allowedToolNames.join(","));

@@ -796,6 +796,7 @@ async function handleMessages(req, res) {
   // the CLI resolves as a real vision attachment — same cheap non-streaming
   // path as text-only requests, no separate code path needed.
   let imageFiles = [];
+  let imageDir = null;
   if (hasImageBlocks(body)) {
     // Image requests skip the <turn> wrapper that keeps `@path` mentions from
     // being resolved by the CLI (see anthropicMessagesToImagePrompt). An
@@ -811,7 +812,7 @@ async function handleMessages(req, res) {
       );
     }
     try {
-      imageFiles = materializeImageBlocks(body);
+      ({ dir: imageDir, paths: imageFiles } = materializeImageBlocks(body));
     } catch (e) {
       // Malformed image block (bad/missing base64 data) — a client error, not
       // a reason to crash the whole process. materializeImageBlocks runs
@@ -855,6 +856,7 @@ async function handleMessages(req, res) {
     jsonSchema,
     mcpConfigPath,
     allowedToolNames,
+    addDirs: imageDir ? [imageDir] : [],
   });
   console.log("[proxy] prompt_len=%d stream_requested=%s images=%d bridged_tools=%d home=%s", promptText.length, body.stream, imageFiles.length, bridgeableTools.length, ctx.home);
 
@@ -869,7 +871,7 @@ async function handleMessages(req, res) {
   });
   killOnDisconnect(res, proc);
   proc.on("close", () => {
-    for (const f of imageFiles) fsp.unlink(f).catch(() => {});
+    if (imageDir) fsp.rm(imageDir, { recursive: true, force: true }).catch(() => {});
     if (mcpConfigPath) fsp.unlink(mcpConfigPath).catch(() => {});
     postSpawnCleanup(ctx)
       .catch((e) => console.error("[proxy] postSpawnCleanup failed:", e.message))
@@ -890,12 +892,16 @@ const IMAGE_MEDIA_TYPE_EXT = {
 };
 
 /**
- * Write every base64 `image` content block in the request to its own temp
- * file. Returns the list of file paths (in message/block order) for
- * substituteImagePaths to consume and for the caller to delete once the
- * subprocess exits.
+ * Write every base64 `image` content block in the request to its own file in
+ * a fresh private directory. Returns the directory and the file paths (in
+ * message/block order): substituteImagePaths consumes the paths, buildClaudeArgs
+ * passes the directory as `--add-dir` (the CLI only reads `@path` files inside
+ * its working directory or an added one), and the caller removes the directory
+ * once the subprocess exits. The directory is per request and holds nothing
+ * but this request's images, so the access it grants stays that narrow.
  */
 function materializeImageBlocks(body) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "hcp-img-"));
   const paths = [];
   try {
     for (const m of body.messages) {
@@ -915,18 +921,18 @@ function materializeImageBlocks(body) {
           throw new Error("image block source.data must be a non-empty base64 string");
         }
         const ext = IMAGE_MEDIA_TYPE_EXT[block.source.media_type] ?? "bin";
-        const filePath = path.join(os.tmpdir(), `hcp-image-${randomBytes(8).toString("hex")}.${ext}`);
+        const filePath = path.join(dir, `image-${paths.length}.${ext}`);
         fs.writeFileSync(filePath, Buffer.from(block.source.data, "base64"));
         paths.push(filePath);
       }
     }
   } catch (e) {
     // A later block threw after earlier ones were already written — the caller
-    // never receives these paths, so unlink them here rather than leak them.
-    for (const p of paths) fs.rmSync(p, { force: true });
+    // never receives the directory, so remove it here rather than leak it.
+    fs.rmSync(dir, { recursive: true, force: true });
     throw e;
   }
-  return paths;
+  return { dir, paths };
 }
 
 /**
