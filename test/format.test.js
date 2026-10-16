@@ -204,6 +204,19 @@ test("buildClaudeArgs: includes system prompt when provided", () => {
   assert.equal(args[idx + 1], "Be concise.");
 });
 
+test("buildClaudeArgs: omits --add-dir by default", () => {
+  const args = buildClaudeArgs({ model: "x", systemPrompt: null, streaming: false });
+  assert.ok(!args.includes("--add-dir"));
+});
+
+test("buildClaudeArgs: grants read access to each added dir with its own flag", () => {
+  const args = buildClaudeArgs({ model: "x", systemPrompt: null, streaming: false, addDirs: ["/tmp/a", "/tmp/b"] });
+  const flagIdx = args.map((a, i) => (a === "--add-dir" ? i : -1)).filter((i) => i >= 0);
+  assert.deepEqual(flagIdx.map((i) => args[i + 1]), ["/tmp/a", "/tmp/b"]);
+  // A flag must follow each dir: --add-dir is variadic and would swallow a bare positional.
+  for (const i of flagIdx) assert.ok(args[i + 2].startsWith("--"), `value after ${args[i + 1]} is not a flag`);
+});
+
 test("buildClaudeArgs: omits --json-schema when no schema given", () => {
   const args = buildClaudeArgs({ model: "x", systemPrompt: null, streaming: false });
   assert.ok(!args.includes("--json-schema"));
