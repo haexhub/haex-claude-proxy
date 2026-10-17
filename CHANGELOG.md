@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.1](https://github.com/haexhub/haex-claude-proxy/compare/v0.8.0...v0.8.1) (2026-10-16)
+
+
+### Bug Fixes
+
+* give the CLI read access to the request's image directory ([4a35d6f](https://github.com/haexhub/haex-claude-proxy/commit/4a35d6fa3b727c7f724fbb762976238c6994cb8b))
+* give the CLI read access to the request's image directory ([c0ce661](https://github.com/haexhub/haex-claude-proxy/commit/c0ce6613f40ab2eeac96ba2fa4502a6cfb4c3b76))
+* give the CLI read access to the request's image directory ([adf0470](https://github.com/haexhub/haex-claude-proxy/commit/adf0470bc80a9f30c01cd808472ce47c86b33845))
+
 ## [0.8.0](https://github.com/haexhub/haex-claude-proxy/compare/v0.7.0...v0.8.0) (2026-10-13)
 
 
