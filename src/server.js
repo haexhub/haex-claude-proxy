@@ -92,6 +92,31 @@ const PORT = Number(process.env.PORT ?? 8080);
 const HOST = process.env.HOST ?? "0.0.0.0";
 const CLAUDE_BIN = process.env.CLAUDE_BIN ?? "claude";
 
+/**
+ * Linux rejects a single command-line argument over 128 KiB (MAX_ARG_STRLEN)
+ * with E2BIG. The prompt used to be passed as `--print <prompt>`, so one large
+ * request (e.g. ~78k Cyrillic characters = ~156 KB) made `spawn` throw — and
+ * because that throw is synchronous inside an async handler, it took the whole
+ * process down with every in-flight request. Prompts over this size are now
+ * written to the CLI's stdin instead (`claude --print` reads the prompt from
+ * stdin when no prompt argument is given); smaller ones keep using argv.
+ */
+const MAX_ARGV_PROMPT_BYTES = 100_000;
+
+function spawnClaudePrint(cliArgs, promptText, env) {
+  const viaStdin = Buffer.byteLength(promptText, "utf8") > MAX_ARGV_PROMPT_BYTES;
+  const proc = spawn(CLAUDE_BIN, viaStdin ? [...cliArgs, "--print"] : [...cliArgs, "--print", promptText], {
+    stdio: [viaStdin ? "pipe" : "ignore", "pipe", "pipe"],
+    env,
+  });
+  if (viaStdin) {
+    // The CLI may exit (or be killed on client disconnect) before reading it all.
+    proc.stdin.on("error", () => {});
+    proc.stdin.end(promptText);
+  }
+  return proc;
+}
+
 // Models advertised on GET /v1/models. Claude Code 2.1+ probes this endpoint
 // at startup; if it returns 404 or an empty list, every `--model X` invocation
 // fails with the misleading "selected model may not exist" error — even for
@@ -348,6 +373,9 @@ function handleHealthz(res) {
     res.end(JSON.stringify({ ok: false, error: e.message }));
   });
   proc.on("close", (code) => {
+    // A failed spawn emits "error" and then "close": the response is already
+    // sent, and writing it twice throws ERR_HTTP_HEADERS_SENT (uncaught).
+    if (res.headersSent) return;
     if (code === 0) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, claudeVersion: out.trim() }));
@@ -865,10 +893,17 @@ async function handleMessages(req, res) {
   // refresh — see home-lock.js for why concurrent refreshes corrupt
   // credentials.json. Requests against a fresh token run fully in parallel.
   const releaseHomeLock = await acquireHomeLockIfStale(ctx.home);
-  const proc = spawn(CLAUDE_BIN, [...cliArgs, "--print", promptText], {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: envForHome(ctx.home),
-  });
+  let proc;
+  try {
+    proc = spawnClaudePrint(cliArgs, promptText, envForHome(ctx.home));
+  } catch (e) {
+    // A synchronous spawn failure must fail this request only, never the
+    // process (see MAX_ARGV_PROMPT_BYTES), and must not leak the lock/temp files.
+    if (imageDir) fsp.rm(imageDir, { recursive: true, force: true }).catch(() => {});
+    if (mcpConfigPath) fsp.unlink(mcpConfigPath).catch(() => {});
+    releaseHomeLock();
+    return errorResponse(res, 500, "api_error", `claude spawn failed: ${e.message}`);
+  }
   killOnDisconnect(res, proc);
   proc.on("close", () => {
     if (imageDir) fsp.rm(imageDir, { recursive: true, force: true }).catch(() => {});
@@ -1006,10 +1041,13 @@ async function handleChatCompletions(req, res) {
   // Only serialize while the token is close to expiry — see the matching
   // comment in handleMessages / home-lock.js.
   const releaseHomeLock = await acquireHomeLockIfStale(ctx.home);
-  const proc = spawn(CLAUDE_BIN, [...cliArgs, "--print", promptText], {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: envForHome(ctx.home),
-  });
+  let proc;
+  try {
+    proc = spawnClaudePrint(cliArgs, promptText, envForHome(ctx.home));
+  } catch (e) {
+    releaseHomeLock();
+    return errorResponse(res, 500, "api_error", `claude spawn failed: ${e.message}`);
+  }
   killOnDisconnect(res, proc);
   proc.on("close", () => {
     postSpawnCleanup(ctx)
